@@ -1,0 +1,97 @@
+name: CI
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  detect:
+    name: Detect workspaces
+    runs-on: ubuntu-latest
+    outputs:
+      engine: ${{ steps.probe.outputs.engine }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: probe
+        run: |
+          if [ -f engine/Cargo.toml ]; then echo "engine=true" >> "$GITHUB_OUTPUT"; else echo "engine=false" >> "$GITHUB_OUTPUT"; fi
+
+  web:
+    name: Web · lint · typecheck · test · build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run typecheck
+      - run: npm run test
+      - run: npm run build
+      - name: Upload build (for inspection)
+        uses: actions/upload-artifact@v4
+        with:
+          name: web-dist
+          path: web/dist
+          retention-days: 7
+
+  engine:
+    name: Engine · ${{ matrix.os }}
+    needs: detect
+    if: needs.detect.outputs.engine == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: engine
+      - name: Determinism lint (no std transcendental math in engine code)
+        shell: bash
+        run: bash scripts/lint-determinism.sh
+      - name: Format
+        run: cargo fmt --manifest-path engine/Cargo.toml --all -- --check
+      - name: Clippy
+        run: cargo clippy --manifest-path engine/Cargo.toml --workspace --all-targets -- -D warnings
+      - name: Test (native)
+        run: cargo test --manifest-path engine/Cargo.toml --workspace --locked
+      - name: Install wasm-pack
+        uses: jetli/wasm-pack-action@v0.4.0
+        with:
+          version: latest
+      - name: Build wasm (nodejs target for the determinism test)
+        run: wasm-pack build engine/wasm --target nodejs --release
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Test (wasm output == native golden)
+        run: node --test engine/wasm/test
+      - name: Upload golden report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: golden-${{ matrix.os }}
+          path: engine/golden/**/*.json
+          if-no-files-found: ignore
+          retention-days: 7

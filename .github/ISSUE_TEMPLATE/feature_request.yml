@@ -1,0 +1,23 @@
+name: ✨ 기능 제안
+description: 에디터·채점·공유·게임 루프 개선 아이디어
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: 어떤 문제를 풀고 싶나요?
+      description: 기능이 아니라 상황을 먼저 적어주세요.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: 제안
+    validations:
+      required: true
+  - type: checkboxes
+    id: scope
+    attributes:
+      label: 스펙 확인
+      options:
+        - label: 스펙의 Non-Goals(서버·계정·브러시 마스크·회전 크롭 등)에 해당하지 않음을 확인했습니다
