@@ -1,0 +1,47 @@
+name: 🐛 버그 리포트
+description: 동작이 스펙이나 기대와 다를 때
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        재현 가능한 정보가 많을수록 빨리 고칩니다. 채점 관련 버그라면 **레시피 JSON**과 **점수 JSON**을 꼭 붙여주세요.
+  - type: input
+    id: url
+    attributes:
+      label: 발생 위치
+      placeholder: https://rwe.kr/retouch/c/012
+  - type: textarea
+    id: what
+    attributes:
+      label: 무엇이 일어났나요?
+      description: 기대한 동작과 실제 동작
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: 재현 단계
+      placeholder: |
+        1. 챌린지 #012 열기
+        2. 노출 +1.0, 방사형 마스크 추가
+        3. 제출
+    validations:
+      required: true
+  - type: textarea
+    id: recipe
+    attributes:
+      label: 레시피 / 점수 JSON (해당 시)
+      render: json
+  - type: input
+    id: env
+    attributes:
+      label: 환경
+      placeholder: iPhone 12 · iOS 18 · Safari / Windows 11 · Chrome 131
+    validations:
+      required: true
+  - type: input
+    id: versions
+    attributes:
+      label: 엔진 · 채점 버전 (결과 화면 하단)
+      placeholder: engine-0.1.0 · scoring-0.1.0

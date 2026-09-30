@@ -1,0 +1,46 @@
+name: 🎞️ 챌린지 제안
+description: 새 챌린지(원본 사진 + 가르치는 기법) 아이디어
+labels: [content]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        챌린지는 **CC0 / Unsplash / Pexels 라이선스** 사진만 사용합니다. 튜토리얼의 기법은 참고하되 이미지 자산은 가져오지 않습니다.
+  - type: input
+    id: photo
+    attributes:
+      label: 원본 사진 URL
+      placeholder: https://unsplash.com/photos/...
+    validations:
+      required: true
+  - type: dropdown
+    id: type
+    attributes:
+      label: 유형
+      options: [글로벌 (전역 보정), 로컬 (마스크), 구도 (크롭)]
+    validations:
+      required: true
+  - type: dropdown
+    id: difficulty
+    attributes:
+      label: 난이도
+      options: [쉬움 — 기본 패널 몇 개, 보통 — HSL·커브 포함, 어려움 — 마스크 포함]
+    validations:
+      required: true
+  - type: input
+    id: technique
+    attributes:
+      label: 가르치는 기법 (한 줄)
+      placeholder: 역광 인물의 얼굴을 방사형 마스크로 살리기
+    validations:
+      required: true
+  - type: textarea
+    id: sources
+    attributes:
+      label: 참고 튜토리얼 / 출처
+      placeholder: Lightroom, Capture One, Snapseed, DaVinci 등의 공개 튜토리얼 링크
+  - type: textarea
+    id: recipe
+    attributes:
+      label: 레시피 JSON (있다면)
+      render: json
