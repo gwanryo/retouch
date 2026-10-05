@@ -78,7 +78,24 @@ jobs:
         run: cargo clippy --locked --manifest-path engine/Cargo.toml --workspace --all-targets -- -D warnings
       - name: Test (native, debug)
         run: cargo test --locked --manifest-path engine/Cargo.toml --workspace
-      # >>> wasm steps (Plan 1a-3 Task 10)
+      - name: Clippy (wasm32)
+        run: cargo clippy --locked --manifest-path engine/Cargo.toml -p engine-wasm --all-targets --target wasm32-unknown-unknown -- -D warnings
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Install wasm-pack 0.15.0
+        uses: jetli/wasm-pack-action@v0.4.0
+        with:
+          version: v0.15.0
+      # wasm-pack 0.15.0 passes arguments after the crate path straight to `cargo test`
+      # (src/test/mod.rs `cmd.args(extra_options)`); arguments after `--` would reach the test
+      # runner instead.
+      - name: Wasm unit tests (Sharma vectors inside wasm32)
+        run: wasm-pack test --node engine/wasm --locked
+      - name: Build wasm (nodejs, release)
+        run: wasm-pack build engine/wasm --target nodejs --release -- --locked
+      - name: Test (wasm == native)
+        run: node --test "engine/wasm/test/*.test.mjs"
       # >>> golden steps (Plan 1a-4 Task 14)
       - name: Cargo.lock unchanged
         shell: bash
