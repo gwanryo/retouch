@@ -14,6 +14,8 @@ pub mod render;
 pub mod resample;
 pub mod score;
 
+pub use resample::scoring_image;
+
 /// Render pipeline version. Bump whenever any render math changes (golden hashes change).
 pub const ENGINE_VERSION: &str = "engine-0.1.0";
 /// Scoring version. Bump whenever score math, [`score::T_TILE`] or the scoring-image path changes.
