@@ -40,7 +40,7 @@ design-taste-frontend의 하드 룰 중 이 프로젝트에서 특히 지킬 것
 
 ### Rust 엔진 (`engine/`)
 - 코드 작성·리뷰·계획 문서의 Rust 코드 포함 전에 **`rust-best-practices`** 로드.
-- 마스터 플랜 §5 결정성 규율 준수: 초월함수는 `libm::*`만, std 수학 함수(`f32::powf` 등)·`mul_add`·`target-cpu` 금지, 8bit 양자화는 `image.rs`의 단일 함수, `Cargo.lock` 커밋.
+- 마스터 플랜 §5 결정성 규율 준수: 초월함수는 `libm::*`만, std 수학 함수(`f32::powf` 등)·`mul_add`·`target-cpu` 금지, 8bit 양자화는 `buffer.rs`의 `quantize` 단일 함수(렌더 최종·채점 이미지 두 지점), `Cargo.lock` 커밋.
 - 렌더/채점 수식 변경 시 `ENGINE_VERSION`/`SCORING_VERSION` 범프 + 골든 재생성.
 
 ### 공통
