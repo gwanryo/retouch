@@ -229,4 +229,57 @@ mod tests {
             assert_eq!(again.recipe(), n.recipe());
         }
     }
+
+    mod clamping {
+        use super::*;
+
+        #[test]
+        fn clamps_exposure_and_reports_path_from_to() {
+            let n = Recipe::from_json(r#"{"schema_version":1,"basic":{"exposure":9}}"#).unwrap();
+            let want = Normalization {
+                path: "basic.exposure".into(),
+                from: 9.0,
+                to: 5.0,
+                reason: "clamped",
+            };
+            assert_eq!(n.normalizations(), &[want]);
+        }
+
+        #[test]
+        fn reports_hsl_band_index() {
+            let n = Recipe::from_json(r#"{"schema_version":1,"hsl":{"hue":[0,0,0,150,0,0,0,0]}}"#)
+                .unwrap();
+            assert_eq!(n.normalizations()[0].path, "hsl.hue[3]");
+        }
+
+        #[test]
+        fn serializes_report_with_recipe_and_normalizations() {
+            let n = Recipe::from_json(r#"{"schema_version":1,"basic":{"tint":-300}}"#).unwrap();
+            let v: serde_json::Value = serde_json::to_value(&n).unwrap();
+            assert_eq!(v["normalizations"][0]["path"], "basic.tint");
+            assert_eq!(v["recipe"]["basic"]["tint"], -100.0);
+        }
+
+        #[test]
+        fn rejects_f32_overflow_as_non_finite() {
+            let e = err(r#"{"schema_version":1,"basic":{"exposure":1e39}}"#);
+            assert_eq!(e, RecipeError::NonFinite("basic.exposure".into()));
+        }
+
+        #[test]
+        fn rejects_negative_f32_overflow_as_non_finite() {
+            let e = err(r#"{"schema_version":1,"basic":{"contrast":-1e39}}"#);
+            assert_eq!(e, RecipeError::NonFinite("basic.contrast".into()));
+        }
+
+        #[test]
+        fn in_memory_nan_is_rejected_with_path() {
+            let mut r = Recipe::default();
+            r.detail.grain_size = f32::NAN;
+            assert_eq!(
+                r.normalize().unwrap_err(),
+                RecipeError::NonFinite("detail.grain_size".into())
+            );
+        }
+    }
 }
