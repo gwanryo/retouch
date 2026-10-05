@@ -282,4 +282,134 @@ mod tests {
             );
         }
     }
+
+    mod structure {
+        use super::*;
+
+        fn radial(cx: f32) -> String {
+            format!(r#"{{"kind":"radial","cx":{cx},"cy":0.5,"rx":0.2,"ry":0.2,"feather":0.5}}"#)
+        }
+
+        #[test]
+        fn reports_mask_index_in_path() {
+            let json = format!(
+                r#"{{"schema_version":1,"masks":[{},{{"kind":"radial","cx":0.5,"cy":0.5,"rx":0.2,"ry":0.2,"feather":0.5,"adjust":{{"exposure":-7}}}}]}}"#,
+                radial(0.5)
+            );
+            let n = Recipe::from_json(&json).unwrap();
+            assert_eq!(n.normalizations()[0].path, "masks[1].adjust.exposure");
+        }
+
+        #[test]
+        fn rejects_more_than_three_masks() {
+            let m = radial(0.5);
+            let json = format!(r#"{{"schema_version":1,"masks":[{m},{m},{m},{m}]}}"#);
+            assert_eq!(err(&json), RecipeError::TooManyMasks(4));
+        }
+
+        #[test]
+        fn rejects_curve_with_17_points() {
+            let pts: Vec<String> = (0..17)
+                .map(|i| format!("[{},{}]", i * 15, i * 15))
+                .collect();
+            let json = format!(
+                r#"{{"schema_version":1,"tone_curve":{{"red":[{}]}}}}"#,
+                pts.join(",")
+            );
+            assert_eq!(
+                err(&json),
+                RecipeError::CurvePointCount {
+                    channel: "red",
+                    count: 17
+                }
+            );
+        }
+
+        #[test]
+        fn rejects_curve_with_one_point() {
+            let e = err(r#"{"schema_version":1,"tone_curve":{"master":[[0,0]]}}"#);
+            assert_eq!(
+                e,
+                RecipeError::CurvePointCount {
+                    channel: "master",
+                    count: 1
+                }
+            );
+        }
+
+        #[test]
+        fn rejects_non_increasing_curve_x() {
+            let e = err(
+                r#"{"schema_version":1,"tone_curve":{"blue":[[0,0],[128,100],[128,140],[255,255]]}}"#,
+            );
+            assert_eq!(
+                e,
+                RecipeError::CurveNotIncreasing {
+                    channel: "blue",
+                    index: 2
+                }
+            );
+        }
+
+        #[test]
+        fn rejects_linear_mask_with_equal_endpoints() {
+            let e = err(
+                r#"{"schema_version":1,"masks":[{"kind":"linear","x0":0.3,"y0":0.3,"x1":0.3,"y1":0.3,"feather":0.5}]}"#,
+            );
+            assert!(
+                matches!(e, RecipeError::DegenerateMask { index: 0, .. }),
+                "{e:?}"
+            );
+        }
+
+        #[test]
+        fn rejects_radial_mask_with_zero_radius() {
+            let e = err(
+                r#"{"schema_version":1,"masks":[{"kind":"radial","cx":0.5,"cy":0.5,"rx":0,"ry":0.2,"feather":0.5}]}"#,
+            );
+            assert!(
+                matches!(e, RecipeError::DegenerateMask { index: 0, .. }),
+                "{e:?}"
+            );
+        }
+
+        #[test]
+        fn rejects_inverted_range_mask() {
+            let e = err(
+                r#"{"schema_version":1,"masks":[{"kind":"range","channel":"luminance","lo":0.7,"hi":0.2,"smooth":0.1}]}"#,
+            );
+            assert_eq!(e, RecipeError::RangeInverted { index: 0 });
+        }
+
+        #[test]
+        fn rejects_zero_width_hard_range_mask() {
+            let e = err(
+                r#"{"schema_version":1,"masks":[{"kind":"range","channel":"hue","lo":0.4,"hi":0.4,"smooth":0}]}"#,
+            );
+            assert!(
+                matches!(e, RecipeError::DegenerateMask { index: 0, .. }),
+                "{e:?}"
+            );
+        }
+
+        #[test]
+        fn rejects_crop_smaller_than_quarter_area() {
+            let e = err(r#"{"schema_version":1,"crop":{"x":0,"y":0,"w":0.4,"h":0.4}}"#);
+            assert!(matches!(e, RecipeError::CropTooSmall(_)), "{e:?}");
+        }
+
+        #[test]
+        fn accepts_crop_of_exactly_quarter_area() {
+            assert!(Recipe::from_json(
+                r#"{"schema_version":1,"crop":{"x":0,"y":0,"w":0.5,"h":0.5}}"#
+            )
+            .is_ok());
+        }
+
+        #[test]
+        fn rejects_crop_outside_unit_square() {
+            let e = err(r#"{"schema_version":1,"crop":{"x":0.5,"y":0,"w":0.6,"h":1}}"#);
+            assert!(matches!(e, RecipeError::CropOutOfBounds { .. }), "{e:?}");
+        }
+    }
 }
