@@ -29,8 +29,10 @@ function fixture(edit = () => {}) {
     files: { 'images/a.jpg': { sha256: sha('sha256', IMAGE) } },
     sources: { a: { sha1: sha('sha1', IMAGE), sha256: sha('sha256', IMAGE) } },
   }
-  edit(spec, root)
+  const cases = { images: { a: 'images/a.jpg' } }
+  edit(spec, root, cases)
   writeFileSync(join(root, 'engine/golden/sources.json'), JSON.stringify(spec))
+  writeFileSync(join(root, 'engine/golden/cases.json'), JSON.stringify(cases))
   return root
 }
 
@@ -75,6 +77,18 @@ test('fails when the lockfile hash does not match the generator commit', () => {
   const r = run(fixture((s) => (s.generator.cargo_lock_sha256 = '0'.repeat(64))))
   assert.equal(r.code, 1)
   assert.match(r.out, /MISMATCH generator cargo_lock_sha256/)
+})
+
+test('fails when a cases.json image has no provenance record', () => {
+  const r = run(fixture((s) => delete s.files['images/a.jpg']))
+  assert.equal(r.code, 1)
+  assert.match(r.out, /NO PROVENANCE for cases\.json image a: images\/a\.jpg/)
+})
+
+test('fails on an empty files list', () => {
+  const r = run(fixture((s) => (s.files = {})))
+  assert.equal(r.code, 1)
+  assert.match(r.out, /EMPTY sources\.json files/)
 })
 
 test('checks a downloaded source by SHA-1 and SHA-256', () => {

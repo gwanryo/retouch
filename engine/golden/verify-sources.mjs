@@ -4,6 +4,7 @@
 //       repository and its engine/Cargo.lock must hash to cargo_lock_sha256
 //   node engine/golden/verify-sources.mjs [--dir <golden dir>] <name> <path>
 //       a downloaded source (SHA-1 + SHA-256)
+// Every image in cases.json must have a record in sources.json `files`.
 // Exits 1 on any mismatch, missing file, unfilled or unverifiable generator record.
 // The generator check needs the full history (CI checks out with fetch-depth: 0).
 import { createHash } from 'node:crypto'
@@ -70,7 +71,14 @@ if (name) {
   if (!src) throw new Error(`unknown source ${name}`)
   check(`source ${name}`, resolve(path), { sha1: src.sha1, sha256: src.sha256 })
 } else {
-  for (const [file, meta] of Object.entries(spec.files)) {
+  const files = Object.entries(spec.files ?? {})
+  if (files.length === 0) fail('EMPTY sources.json files: no provenance records')
+  // every image the goldens decode must have a provenance record, or its byte check is skipped
+  const cases = JSON.parse(readFileSync(resolve(dir, 'cases.json'), 'utf8'))
+  for (const [name, file] of Object.entries(cases.images ?? {})) {
+    if (!spec.files?.[file]) fail(`NO PROVENANCE for cases.json image ${name}: ${file}`)
+  }
+  for (const [file, meta] of files) {
     check(file, resolve(dir, file), { sha256: meta.sha256 })
   }
   checkGenerator(spec.generator)
