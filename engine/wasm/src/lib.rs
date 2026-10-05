@@ -15,10 +15,13 @@ use wasm_bindgen::prelude::*;
 #[wasm_bindgen(getter_with_clone)]
 pub struct ImageData {
     /// Width in pixels.
+    #[wasm_bindgen(readonly)]
     pub width: u32,
     /// Height in pixels.
+    #[wasm_bindgen(readonly)]
     pub height: u32,
     /// RGBA8 bytes, row-major.
+    #[wasm_bindgen(readonly)]
     pub rgba: Vec<u8>,
 }
 
@@ -155,7 +158,7 @@ pub fn versions() -> String {
 pub fn memory_bytes() -> f64 {
     #[cfg(target_arch = "wasm32")]
     {
-        (core::arch::wasm32::memory_size::<0>() * 65_536) as f64
+        core::arch::wasm32::memory_size::<0>() as f64 * 65_536.0
     }
     #[cfg(not(target_arch = "wasm32"))]
     {

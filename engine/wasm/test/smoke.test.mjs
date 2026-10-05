@@ -97,6 +97,14 @@ test('ImageData owns wasm memory: rgba reads copy, free() releases it', () => {
   assert.throws(() => img.width, /null pointer passed to rust/)
 })
 
+test('ImageData fields are read-only accessors (no JS setters)', () => {
+  for (const name of ['width', 'height', 'rgba']) {
+    const d = Object.getOwnPropertyDescriptor(wasm.ImageData.prototype, name)
+    assert.ok(d && typeof d.get === 'function', `${name} has a getter`)
+    assert.strictEqual(d.set, undefined, `${name} has no setter`)
+  }
+})
+
 test('validate_recipe reports clamped fields with mask-indexed paths', () => {
   const json = '{"schema_version":1,"basic":{"exposure":9},"masks":[{"kind":"radial","cx":0.5,"cy":0.5,"rx":0.2,"ry":0.2,"feather":0.5,"adjust":{"tint":-300}}]}'
   const report = JSON.parse(wasm.validate_recipe(json))
