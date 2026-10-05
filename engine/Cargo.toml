@@ -1,0 +1,65 @@
+[workspace]
+resolver = "2"
+members = ["core", "cli", "wasm"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+rust-version = "1.87"
+repository = "https://github.com/gwanryo/retouch"
+
+[workspace.dependencies]
+# Crates that decide pixel values are pinned exactly (master plan §5.3); Cargo.lock pins the rest.
+engine-core = { path = "core" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# `arch` swaps in hardware sqrt/fma/rint. Those are IEEE-exact too, but we keep every target on
+# the same pure-Rust code path (master plan §5.1).
+libm = { version = "=0.2.16", default-features = false, features = ["force-soft-floats"] }
+sha2 = "0.10"
+thiserror = "2"
+# Scalar decoder only: the default `x86`/`neon` features enable SIMD IDCT/upsampling/color
+# conversion, which wasm32 does not have (master plan A2).
+zune-jpeg = { version = "=0.5.15", default-features = false, features = ["std"] }
+zune-core = { version = "0.5", default-features = false, features = ["std"] }
+png = "=0.18.1"
+jpeg-encoder = { version = "=0.7.1", default-features = false, features = ["std"] }
+clap = { version = "4", default-features = false, features = ["std", "derive", "help", "usage", "error-context"] }
+anyhow = "1"
+wasm-bindgen = "0.2"
+wasm-bindgen-test = "0.3"
+
+[workspace.lints.rust]
+missing_docs = "warn"
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+unwrap_used = "deny"
+expect_used = "deny"
+# Pixel code converts between u8/u32/usize/f32/f64 constantly; every cast site is bounded by
+# BufferError/MAX_PIXELS checks, so these pedantic cast lints are noise here.
+cast_possible_truncation = "allow"
+cast_precision_loss = "allow"
+cast_sign_loss = "allow"
+cast_possible_wrap = "allow"
+# Math code uses short conventional names (r, g, b, l, a, x, y).
+many_single_char_names = "allow"
+similar_names = "allow"
+# Public fns in this engine are all pure; marking each #[must_use] adds noise, not safety.
+must_use_candidate = "allow"
+# Error variants are documented on the error enums themselves.
+missing_errors_doc = "allow"
+# Determinism tests compare exact bits on purpose, and the engine's own logic compares clamped
+# values to detect changes; an epsilon would hide exactly the drift we are guarding against.
+float_cmp = "allow"
+# Formulas must read exactly as written so the GLSL (Plan 2) and JS ports match term by term;
+# `f64::midpoint` is a different expression.
+manual_midpoint = "allow"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1

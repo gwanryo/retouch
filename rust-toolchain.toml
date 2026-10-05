@@ -1,0 +1,6 @@
+# Pinned so clippy/rustfmt/codegen are identical locally and in CI (master plan §5.4).
+[toolchain]
+channel = "1.98.1"
+components = ["clippy", "rustfmt"]
+targets = ["wasm32-unknown-unknown"]
+profile = "minimal"

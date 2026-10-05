@@ -1,0 +1,24 @@
+[package]
+name = "engine-core"
+description = "Retouch reference engine: deterministic decode, render, resample and score"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+libm.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+zune-jpeg.workspace = true
+
+png.workspace = true
+
+[dev-dependencies]
+jpeg-encoder.workspace = true
+
+[lints]
+workspace = true
