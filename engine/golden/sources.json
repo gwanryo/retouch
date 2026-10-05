@@ -1,0 +1,56 @@
+{
+  "license_check": "Wikimedia Commons API extmetadata.LicenseShortName == \"CC0\" (CC0 1.0), read 2026-10-04",
+  "generator": {
+    "about": "engine-cli build that produced the processed files below (fixture, prep-photo)",
+    "commit": "f581ee0e5e13c033428651665281595e2466e51b",
+    "cargo_lock_sha256": "68ea93d2b180846ff1961ecd53c989fa27782fa9b72c079cda72e2f72e246345"
+  },
+  "files": {
+    "images/flowers_1600x1200_baseline422.jpg": {
+      "sha256": "9402a680387806d83fc98118a4a432225740bae3f4ee22eb7b5f8119b4e97657",
+      "source": "flowers",
+      "processing": "none: original bytes (camera baseline JPEG, 4:2:2, EXIF orientation 1)"
+    },
+    "images/portrait_1530x2040_progressive420.jpg": {
+      "sha256": "44dd6ec29078e88ae2f11af9433f2d527109bd9dbed8a7308b566e1cbc21b2e8",
+      "source": "portrait",
+      "processing": "none: original bytes (progressive JPEG, 4:2:0)"
+    },
+    "images/lake_2048x1365_baseline420.jpg": {
+      "sha256": "11a19957737f821fa2cedc488ed4663048e7f74358d7935e151c92f5aa562a0f",
+      "source": "lake",
+      "processing": "engine-cli prep-photo --input <lake source> --long-edge 2048 --quality 90 --output images/lake_2048x1365_baseline420.jpg"
+    },
+    "images/synthetic_512x384_baseline420.jpg": {
+      "sha256": "db96b85ade61f3ae2a2604453c31bbaaf83cc2cf946164348ee68cf5d4bce0f8",
+      "source": null,
+      "processing": "engine-cli fixture --out-dir <tmp> --width 512 --height 384, then fixture.jpg"
+    }
+  },
+  "sources": {
+    "flowers": {
+      "page": "https://commons.wikimedia.org/wiki/File:Garden_flowers_in_Thouars_10.jpg",
+      "url": "https://upload.wikimedia.org/wikipedia/commons/d/d3/Garden_flowers_in_Thouars_10.jpg",
+      "author": "Syced",
+      "revision": "2022-02-05T08:58:21Z",
+      "sha1": "e83ca40ce0bcfcda41ae1c81e47bc68982419a61",
+      "sha256": "9402a680387806d83fc98118a4a432225740bae3f4ee22eb7b5f8119b4e97657"
+    },
+    "portrait": {
+      "page": "https://commons.wikimedia.org/wiki/File:Photo_of_Anthony_van_Dyck%27s_%22Portrait_of_Cornelis_van_der_Geest%22.jpg",
+      "url": "https://upload.wikimedia.org/wikipedia/commons/b/b1/Photo_of_Anthony_van_Dyck%27s_%22Portrait_of_Cornelis_van_der_Geest%22.jpg",
+      "author": "PotatoCow25",
+      "revision": "2026-02-09T23:34:10Z",
+      "sha1": "ebd47d04f96b04cfc7dbd00833022ad7c20aeeaa",
+      "sha256": "44dd6ec29078e88ae2f11af9433f2d527109bd9dbed8a7308b566e1cbc21b2e8"
+    },
+    "lake": {
+      "page": "https://commons.wikimedia.org/wiki/File:Lake_Mountain_Landscape.jpg",
+      "url": "https://upload.wikimedia.org/wikipedia/commons/7/75/Lake_Mountain_Landscape.jpg",
+      "author": "Bonnie Moreland (via isorepublic.com)",
+      "revision": "2022-05-03T14:24:14Z",
+      "sha1": "60eab74e7704db6375f1426fb11421ba29d7603e",
+      "sha256": "32c63883fbedbd2da1590245b1ccaa55bdb26ffa63bf3328456202356ed307d6"
+    }
+  }
+}
