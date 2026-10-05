@@ -296,6 +296,21 @@ fn entry(submitted: &Rgba8, score: &engine_core::score::Score) -> Result<PlayerE
     })
 }
 
+/// A repeated name would silently overwrite the earlier result in the snapshot maps.
+fn reject_duplicates<'a>(
+    ctx: At<'_>,
+    kind: &str,
+    names: impl Iterator<Item = &'a str>,
+) -> Result<(), Failure> {
+    let mut seen = std::collections::BTreeSet::new();
+    for name in names {
+        ctx.check(seen.insert(name), || {
+            format!("duplicate {kind} name `{name}` in cases.json")
+        })?;
+    }
+    Ok(())
+}
+
 fn compute(dir: &Path) -> Result<Expected, Failure> {
     let top = at(None, None, "read cases.json");
     let text = top.on(fs::read_to_string(dir.join("cases.json")))?;
@@ -303,6 +318,8 @@ fn compute(dir: &Path) -> Result<Expected, Failure> {
     top.check(!spec.images.is_empty() && !spec.cases.is_empty(), || {
         "cases.json has no images or cases".to_owned()
     })?;
+    reject_duplicates(top, "case", spec.cases.iter().map(|c| c.name.as_str()))?;
+    reject_duplicates(top, "probe", spec.probes.iter().map(|p| p.name.as_str()))?;
 
     let mut decoded = BTreeMap::new();
     let mut images = BTreeMap::new();
@@ -1124,5 +1141,41 @@ mod tests {
             &mut out,
         );
         assert_eq!(out, [".b.c", ".b.d", ".e"]);
+    }
+
+    /// `compute` on a cases.json with the given cases/probes JSON; fails before any image is read.
+    fn compute_error(cases: &str, probes: &str) -> String {
+        let dir = std::env::temp_dir().join(format!(
+            "golden-dup-{}-{}",
+            std::process::id(),
+            cases.len() + probes.len()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let text = format!(
+            "{{\"images\":{{\"i\":\"missing.jpg\"}},\"cases\":{cases},\"probes\":{probes}}}"
+        );
+        fs::write(dir.join("cases.json"), text).unwrap();
+        let Err(failure) = compute(&dir) else {
+            panic!("duplicate names must fail");
+        };
+        let err = failure.to_string();
+        let _ = fs::remove_dir_all(&dir);
+        err
+    }
+
+    const CASE: &str =
+        r#"{"name":"c","image":"i","answer":"a","seed":0,"eligible":false,"players":{}}"#;
+
+    #[test]
+    fn duplicate_case_names_are_rejected_before_computation() {
+        let err = compute_error(&format!("[{CASE},{CASE}]"), "[]");
+        assert!(err.contains("duplicate case name `c`"), "{err}");
+    }
+
+    #[test]
+    fn duplicate_probe_names_are_rejected_before_computation() {
+        let probes = r#"[{"name":"p","width":8,"height":8,"shift":0,"noise":0,"score":[0,100]},{"name":"p","width":9,"height":8,"shift":0,"noise":0,"score":[0,100]}]"#;
+        let err = compute_error(&format!("[{CASE}]"), probes);
+        assert!(err.contains("duplicate probe name `p`"), "{err}");
     }
 }
