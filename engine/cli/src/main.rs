@@ -3,15 +3,23 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 use engine_core::buffer::{ImageF32, Rgba8};
 use engine_core::decode::{decode_rgba8, encode_png};
 use engine_core::hash::sha256_hex;
 use engine_core::recipe::{Normalized, Recipe};
+use engine_core::region::RegionSpec;
 use engine_core::render::{render_rgba8, RenderContext};
-use engine_core::{scoring_image, SCORING_LONG_EDGE};
+use engine_core::score::ScoringReference;
+use engine_core::{
+    scoring_image, ENGINE_VERSION, SCHEMA_VERSION, SCORING_LONG_EDGE, SCORING_VERSION,
+};
+
+/// Long edge of normalized content originals (AC-E1c, master plan §3.2).
+const ORIGINAL_LONG_EDGE: u32 = 2048;
 
 #[derive(Parser)]
 #[command(name = "engine-cli", version, about = "Retouch reference engine")]
@@ -61,6 +69,34 @@ enum Cmd {
         input: PathBuf,
         #[arg(long, default_value_t = SCORING_LONG_EDGE)]
         long_edge: u32,
+        #[arg(long)]
+        output: PathBuf,
+    },
+    /// Write `answer_2048.png`, `answer_1024.png` and `meta.json` for one challenge.
+    GenAnswer {
+        #[arg(long)]
+        input: PathBuf,
+        #[arg(long)]
+        recipe: PathBuf,
+        #[arg(long)]
+        seed: u32,
+        #[arg(long)]
+        out_dir: PathBuf,
+        /// Skip the 2048 long-edge check (fixtures and tests only).
+        #[arg(long)]
+        allow_any_size: bool,
+    },
+    /// Score a full-frame player render against the original and the answer PNG (AC-S1d).
+    Score {
+        #[arg(long)]
+        original: PathBuf,
+        #[arg(long)]
+        answer: PathBuf,
+        #[arg(long)]
+        player: PathBuf,
+        /// Region spec: inline JSON or a path to a JSON file.
+        #[arg(long, default_value = r#"{"kind":"full"}"#)]
+        region: String,
         #[arg(long)]
         output: PathBuf,
     },
@@ -140,6 +176,86 @@ fn make_fixture(width: u16, height: u16) -> Result<Rgba8> {
     Ok(img.to_rgba8())
 }
 
+fn parse_region(arg: &str) -> Result<RegionSpec> {
+    let json = if arg.trim_start().starts_with('{') {
+        arg.to_owned()
+    } else {
+        fs::read_to_string(arg).with_context(|| format!("read region {arg}"))?
+    };
+    Ok(RegionSpec::from_json(&json)?)
+}
+
+fn is_png(path: &Path) -> Result<bool> {
+    let bytes = fs::read(path).with_context(|| format!("read {}", path.display()))?;
+    Ok(bytes.starts_with(&[0x89, b'P', b'N', b'G']))
+}
+
+fn gen_answer(
+    input: &Path,
+    recipe: &Path,
+    seed: u32,
+    out_dir: &Path,
+    allow_any_size: bool,
+) -> Result<()> {
+    let t0 = Instant::now();
+    let src = load_image(input)?;
+    let long = src.width().max(src.height());
+    if long != ORIGINAL_LONG_EDGE && !allow_any_size {
+        bail!("original long edge is {long}, expected {ORIGINAL_LONG_EDGE} (AC-E1c)");
+    }
+    let full = render_rgba8(&src, &load_recipe(recipe)?, &RenderContext { seed })?;
+    let small = scoring_image(&full, SCORING_LONG_EDGE)?;
+    write_png(&out_dir.join("answer_2048.png"), &full)?;
+    write_png(&out_dir.join("answer_1024.png"), &small)?;
+    let meta = serde_json::json!({
+        "engine_version": ENGINE_VERSION,
+        "scoring_version": SCORING_VERSION,
+        "schema_version": SCHEMA_VERSION,
+        "seed": seed,
+        "original_sha256_rgba8": sha256_hex(src.data()),
+        "answer_sha256_rgba8_2048": sha256_hex(full.data()),
+        "answer_sha256_rgba8_1024": sha256_hex(small.data()),
+        "width": full.width(), "height": full.height(),
+        "scoring_width": small.width(), "scoring_height": small.height(),
+    });
+    fs::write(
+        out_dir.join("meta.json"),
+        serde_json::to_string_pretty(&meta)?,
+    )?;
+    eprintln!("gen-answer: {} ms", t0.elapsed().as_millis());
+    println!("{}", sha256_hex(small.data()));
+    Ok(())
+}
+
+fn score_cmd(
+    original: &Path,
+    answer: &Path,
+    player: &Path,
+    region: &str,
+    output: &Path,
+) -> Result<()> {
+    if !is_png(answer)? {
+        bail!(
+            "--answer must be the lossless answer PNG, got {}",
+            answer.display()
+        );
+    }
+    let t0 = Instant::now();
+    let reference = ScoringReference::new(
+        &load_image(original)?,
+        &load_image(answer)?,
+        &parse_region(region)?,
+    )?;
+    let s = reference.score(&load_image(player)?, None)?;
+    if let Some(parent) = output.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(output, serde_json::to_string(&s)?)?;
+    eprintln!("score: {} ms", t0.elapsed().as_millis());
+    println!("{}", s.correction_score);
+    Ok(())
+}
+
 fn main() -> Result<()> {
     match Cli::parse().cmd {
         Cmd::Fixture {
@@ -194,6 +310,20 @@ fn main() -> Result<()> {
                 sha256_hex(out.data())
             );
         }
+        Cmd::GenAnswer {
+            input,
+            recipe,
+            seed,
+            out_dir,
+            allow_any_size,
+        } => gen_answer(&input, &recipe, seed, &out_dir, allow_any_size)?,
+        Cmd::Score {
+            original,
+            answer,
+            player,
+            region,
+            output,
+        } => score_cmd(&original, &answer, &player, &region, &output)?,
         Cmd::Hash { input } => println!("{}", sha256_hex(load_image(&input)?.data())),
     }
     Ok(())

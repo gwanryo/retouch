@@ -129,3 +129,203 @@ fn scoring_image_line_matches_hash_of_its_output() {
     let hash = ok(&["hash", "--input", s(&out)]);
     assert_eq!(line, format!("300x225 {hash}"));
 }
+
+// --- Task 11b: gen-answer and score ---
+
+#[test]
+fn original_scores_0_and_answer_scores_100() {
+    let rec = r#"{"schema_version":1,"basic":{"exposure":0.8,"contrast":25,"temperature":30}}"#;
+    let (dir, jpg, r) = fixture_with_recipe("e2e", rec);
+    let ans = dir.join("ans");
+    let args = [
+        "gen-answer",
+        "--input",
+        s(&jpg),
+        "--recipe",
+        s(&r),
+        "--seed",
+        "1",
+    ];
+    let hash = ok(&[&args[..], &["--out-dir", s(&ans), "--allow-any-size"]].concat());
+    assert_eq!(hash.len(), 64);
+    let answer = ans.join("answer_2048.png");
+    let score = |player: &Path, out: &str| {
+        let out_path = dir.join(out);
+        ok(&[
+            "score",
+            "--original",
+            s(&jpg),
+            "--answer",
+            s(&answer),
+            "--player",
+            s(player),
+            "--output",
+            s(&out_path),
+        ])
+    };
+    assert_eq!(score(&jpg, "s0.json"), "0");
+    assert_eq!(score(&answer, "s1.json"), "100");
+}
+
+#[test]
+fn gen_answer_pngs_and_meta_reproduce_the_scoring_input() {
+    // 2048x1365 original → answer_2048.png, answer_1024.png, meta.json (AC-S1d, A4).
+    // The files stay in engine/target/cli-contract: engine/wasm/test/cli_contract.test.mjs
+    // reads them and must reproduce every hash and the Score JSON string.
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../target/cli-contract");
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    ok(&[
+        "fixture",
+        "--out-dir",
+        s(&dir),
+        "--width",
+        "2048",
+        "--height",
+        "1365",
+    ]);
+    let r = dir.join("r.json");
+    fs::write(
+        &r,
+        r#"{"schema_version":1,"basic":{"exposure":0.4,"vibrance":30}}"#,
+    )
+    .unwrap();
+    let ans = dir.join("ans");
+    let jpg = dir.join("fixture.jpg");
+    let printed = ok(&[
+        "gen-answer",
+        "--input",
+        s(&jpg),
+        "--recipe",
+        s(&r),
+        "--seed",
+        "9",
+        "--out-dir",
+        s(&ans),
+    ]);
+    let meta: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(ans.join("meta.json")).unwrap()).unwrap();
+    let a2048 = ans.join("answer_2048.png");
+    let a1024 = ans.join("answer_1024.png");
+    assert_eq!(
+        ok(&["hash", "--input", s(&a2048)]),
+        meta["answer_sha256_rgba8_2048"]
+    );
+    assert_eq!(
+        ok(&["hash", "--input", s(&a1024)]),
+        meta["answer_sha256_rgba8_1024"]
+    );
+    assert_eq!(printed, meta["answer_sha256_rgba8_1024"]);
+    assert_eq!(
+        (
+            meta["scoring_width"].as_u64(),
+            meta["scoring_height"].as_u64()
+        ),
+        (Some(1024), Some(683))
+    );
+    assert_eq!(meta["seed"], 9);
+    assert!(
+        meta.get("render_ms").is_none(),
+        "meta.json must be deterministic"
+    );
+    // Re-deriving the scoring image from the saved 2048 PNG gives the saved 1024 PNG.
+    let again = dir.join("again.png");
+    let line = ok(&["scoring-image", "--input", s(&a2048), "--output", s(&again)]);
+    assert_eq!(
+        line,
+        format!(
+            "1024x683 {}",
+            meta["answer_sha256_rgba8_1024"].as_str().unwrap()
+        )
+    );
+    // A non-trivial player through the CLI: render → PNG → score against the saved answer PNG.
+    let p = dir.join("p.json");
+    fs::write(
+        &p,
+        r#"{"schema_version":1,"basic":{"exposure":0.2,"vibrance":10,"contrast":-5}}"#,
+    )
+    .unwrap();
+    let player = dir.join("player.png");
+    let player_hash = ok(&[
+        "render",
+        "--input",
+        s(&jpg),
+        "--recipe",
+        s(&p),
+        "--seed",
+        "9",
+        "--output",
+        s(&player),
+    ]);
+    assert_eq!(ok(&["hash", "--input", s(&player)]), player_hash);
+    let printed_score = ok(&[
+        "score",
+        "--original",
+        s(&jpg),
+        "--answer",
+        s(&a2048),
+        "--player",
+        s(&player),
+        "--output",
+        s(&dir.join("score.json")),
+    ]);
+    let n: u8 = printed_score.parse().unwrap();
+    assert!((1..=99).contains(&n), "{printed_score}");
+}
+
+#[test]
+fn gen_answer_rejects_non_2048_originals_without_the_flag() {
+    let (dir, jpg, r) = fixture_with_recipe("size", r#"{"schema_version":1}"#);
+    let out = dir.join("ans");
+    let e = err(&[
+        "gen-answer",
+        "--input",
+        s(&jpg),
+        "--recipe",
+        s(&r),
+        "--seed",
+        "0",
+        "--out-dir",
+        s(&out),
+    ]);
+    assert!(e.contains("expected 2048"), "{e}");
+}
+
+#[test]
+fn score_rejects_a_jpeg_answer() {
+    let (dir, jpg, _) = fixture_with_recipe("jpeg-answer", r#"{"schema_version":1}"#);
+    let out = dir.join("s.json");
+    let e = err(&[
+        "score",
+        "--original",
+        s(&jpg),
+        "--answer",
+        s(&jpg),
+        "--player",
+        s(&jpg),
+        "--output",
+        s(&out),
+    ]);
+    assert!(e.contains("lossless answer PNG"), "{e}");
+}
+
+#[test]
+fn score_rejects_an_unknown_region_kind() {
+    let (dir, jpg, _) = fixture_with_recipe("region", r#"{"schema_version":1}"#);
+    let png = dir.join("fixture.png");
+    let out = dir.join("s.json");
+    let e = err(&[
+        "score",
+        "--original",
+        s(&jpg),
+        "--answer",
+        s(&png),
+        "--player",
+        s(&jpg),
+        "--output",
+        s(&out),
+        "--region",
+        r#"{"kind":"masks"}"#,
+    ]);
+    assert!(e.contains("region"), "{e}");
+}
