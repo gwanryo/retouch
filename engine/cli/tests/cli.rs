@@ -329,3 +329,153 @@ fn score_rejects_an_unknown_region_kind() {
     ]);
     assert!(e.contains("region"), "{e}");
 }
+
+// --- Task 12a: golden write/check contract ---
+
+/// A tiny golden directory: one 64x48 image, one case with one player, one probe.
+fn golden_dir(name: &str) -> PathBuf {
+    let dir = tmp(name);
+    ok(&[
+        "fixture",
+        "--out-dir",
+        s(&dir),
+        "--width",
+        "64",
+        "--height",
+        "48",
+    ]);
+    fs::write(
+        dir.join("answer.json"),
+        r#"{"schema_version":1,"basic":{"exposure":1.0}}"#,
+    )
+    .unwrap();
+    fs::write(
+        dir.join("half.json"),
+        r#"{"schema_version":1,"basic":{"exposure":0.5}}"#,
+    )
+    .unwrap();
+    let cases = r#"{
+  "images": { "fx": "fixture.jpg" },
+  "cases": [ { "name": "c", "image": "fx", "answer": "answer.json", "seed": 0, "eligible": true,
+               "players": { "half": { "recipe": "half.json", "score": [1, 99] } } } ],
+  "probes": [ { "name": "p", "width": 40, "height": 30, "shift": 40, "noise": 20, "score": [0, 100] } ]
+}"#;
+    fs::write(dir.join("cases.json"), cases).unwrap();
+    ok(&["golden", "write", "--dir", s(&dir)]);
+    dir
+}
+
+fn edit_expected(dir: &Path, edit: impl FnOnce(&mut serde_json::Value)) {
+    let path = dir.join("expected.json");
+    let mut v: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    edit(&mut v);
+    fs::write(&path, serde_json::to_string_pretty(&v).unwrap()).unwrap();
+}
+
+fn read_json(path: &Path) -> serde_json::Value {
+    serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap()
+}
+
+#[test]
+fn golden_write_then_check_passes() {
+    let dir = golden_dir("golden-ok");
+    assert_eq!(
+        ok(&["golden", "check", "--dir", s(&dir)]),
+        "golden: ok (1 cases, 1 probes)"
+    );
+}
+
+#[test]
+fn golden_write_refuses_an_unbumped_change_and_keeps_the_file() {
+    let dir = golden_dir("golden-refuse");
+    edit_expected(&dir, |v| {
+        v["cases"]["c"]["answer_sha256"] = "0".repeat(64).into();
+    });
+    let before = fs::read(dir.join("expected.json")).unwrap();
+    let e = err(&["golden", "write", "--dir", s(&dir)]);
+    assert!(
+        e.contains("cases.c.answer_sha256 changed without ENGINE_VERSION bump"),
+        "{e}"
+    );
+    assert_eq!(fs::read(dir.join("expected.json")).unwrap(), before);
+    assert!(!dir.join("expected.json.tmp").exists());
+}
+
+#[test]
+fn golden_check_reports_a_mismatch_with_the_actual_result() {
+    let dir = golden_dir("golden-mismatch");
+    let written = fs::read_to_string(dir.join("expected.json")).unwrap();
+    edit_expected(&dir, |v| {
+        v["cases"]["c"]["players"]["half"]["score_json"] = "{}".into();
+    });
+    let report = dir.join("actual.json");
+    let e = err(&[
+        "golden",
+        "check",
+        "--dir",
+        s(&dir),
+        "--actual-out",
+        s(&report),
+    ]);
+    assert!(
+        e.contains("golden mismatch") && e.contains(".cases.c.players.half.score_json"),
+        "{e}"
+    );
+    // The report is the recomputed expected.json, byte for byte what golden write wrote.
+    assert_eq!(fs::read_to_string(&report).unwrap(), written);
+}
+
+#[test]
+fn golden_compute_failure_is_reported_with_context_and_writes_nothing() {
+    let dir = golden_dir("golden-fail");
+    fs::remove_file(dir.join("half.json")).unwrap();
+    let before = fs::read(dir.join("expected.json")).unwrap();
+    let report = dir.join("actual.json");
+    let e = err(&[
+        "golden",
+        "check",
+        "--dir",
+        s(&dir),
+        "--actual-out",
+        s(&report),
+    ]);
+    assert!(
+        e.contains("case c / player half / load player recipe"),
+        "{e}"
+    );
+    let failure = &read_json(&report)["failure"];
+    assert_eq!(
+        (&failure["case"], &failure["player"], &failure["stage"]),
+        (
+            &serde_json::json!("c"),
+            &serde_json::json!("half"),
+            &serde_json::json!("load player recipe")
+        )
+    );
+    let e = err(&["golden", "write", "--dir", s(&dir)]);
+    assert!(
+        e.contains("case c / player half / load player recipe"),
+        "{e}"
+    );
+    assert_eq!(fs::read(dir.join("expected.json")).unwrap(), before);
+}
+
+#[test]
+fn golden_check_reports_an_unreadable_expected_json() {
+    let dir = golden_dir("golden-unreadable");
+    fs::write(dir.join("expected.json"), "{ not json").unwrap();
+    let report = dir.join("actual.json");
+    let e = err(&[
+        "golden",
+        "check",
+        "--dir",
+        s(&dir),
+        "--actual-out",
+        s(&report),
+    ]);
+    assert!(e.contains("read expected.json"), "{e}");
+    let failure = &read_json(&report)["failure"];
+    assert_eq!(failure["stage"], "read expected.json");
+    assert!(failure["case"].is_null(), "{failure}");
+}

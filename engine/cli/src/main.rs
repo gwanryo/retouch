@@ -1,6 +1,8 @@
 //! `engine-cli`: build-time answer generation, scoring and golden data (master plan A8).
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
+mod golden;
+
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -104,6 +106,11 @@ enum Cmd {
     Hash {
         #[arg(long)]
         input: PathBuf,
+    },
+    /// Golden data: write, check or guard `engine/golden/expected.json`.
+    Golden {
+        #[command(subcommand)]
+        cmd: golden::GoldenCmd,
     },
 }
 
@@ -325,6 +332,7 @@ fn main() -> Result<()> {
             output,
         } => score_cmd(&original, &answer, &player, &region, &output)?,
         Cmd::Hash { input } => println!("{}", sha256_hex(load_image(&input)?.data())),
+        Cmd::Golden { cmd } => golden::run(cmd)?,
     }
     Ok(())
 }
