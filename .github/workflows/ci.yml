@@ -96,7 +96,53 @@ jobs:
         run: wasm-pack build engine/wasm --target nodejs --release -- --locked
       - name: Test (wasm == native)
         run: node --test "engine/wasm/test/*.test.mjs"
-      # >>> golden steps (Plan 1a-4 Task 14)
+      - name: Golden test files present
+        shell: bash
+        run: |
+          # The wasm glob step must not silently lose a test file (e.g. one left out of a commit).
+          for f in engine/wasm/test/smoke.test.mjs engine/wasm/test/golden.test.mjs engine/wasm/test/cli_contract.test.mjs engine/golden/test/verify-sources.test.mjs; do
+            test -f "$f" || { echo "missing $f"; exit 1; }
+          done
+      - name: Golden sources script tests
+        run: node --test engine/golden/test/verify-sources.test.mjs
+      - name: Golden sources intact (needs fetch-depth 0 for the generator commit)
+        run: node engine/golden/verify-sources.mjs
+      - name: Golden (native, debug)
+        run: cargo run --locked --manifest-path engine/Cargo.toml -p engine-cli -- golden check --dir engine/golden --actual-out engine/golden/actual-native-debug.json
+      - name: Golden (native, release)
+        run: cargo run --locked --manifest-path engine/Cargo.toml --release -p engine-cli -- golden check --dir engine/golden --actual-out engine/golden/actual-native-release.json
+      - name: Golden version guard (vs base)
+        if: matrix.os == 'ubuntu-latest'
+        shell: bash
+        env:
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PUSH_BEFORE: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          BASE="${PR_BASE:-${PUSH_BEFORE:-}}"
+          if [ -z "$BASE" ] || [ "$BASE" = "0000000000000000000000000000000000000000" ]; then
+            # New branch push: compare with the default branch.
+            git fetch --no-tags origin main
+            BASE=$(git merge-base origin/main HEAD)
+          fi
+          git cat-file -e "$BASE^{commit}" # unreachable base is an error, not a pass
+          if git cat-file -e "$BASE:engine/golden/expected.json" 2>/dev/null; then
+            git show "$BASE:engine/golden/expected.json" > "$RUNNER_TEMP/base-expected.json"
+            git show "$BASE:engine/Cargo.lock" > "$RUNNER_TEMP/base-Cargo.lock"
+            cargo run --locked --manifest-path engine/Cargo.toml --release -p engine-cli -- \
+              golden guard --base "$RUNNER_TEMP/base-expected.json" --head engine/golden/expected.json \
+              --base-lock "$RUNNER_TEMP/base-Cargo.lock" --head-lock engine/Cargo.lock
+          else
+            echo "expected.json does not exist at $BASE: first introduction, guard not applicable"
+          fi
+      - name: Upload golden failure reports
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: golden-actual-${{ matrix.os }}
+          path: engine/golden/actual-*.json
+          if-no-files-found: ignore
+          retention-days: 7
       - name: Cargo.lock unchanged
         shell: bash
         run: git diff --exit-code -- engine/Cargo.lock

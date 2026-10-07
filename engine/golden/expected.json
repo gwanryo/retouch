@@ -1,0 +1,201 @@
+{
+  "engine_version": "engine-0.1.0",
+  "scoring_version": "scoring-0.1.0",
+  "schema_version": 1,
+  "scoring_params": {
+    "big_error_de": 5.0,
+    "big_error_max_ratio": 0.01,
+    "long_edge": 1024,
+    "min_eligible_de": 3.0,
+    "p95": "nearest_rank_ceil",
+    "perfect_mean_de": 1.0,
+    "region_resample": "source_pixel_at_center",
+    "t_tile": 2.0,
+    "tile": 64
+  },
+  "long_edge": 1024,
+  "images": {
+    "flowers": {
+      "width": 1600,
+      "height": 1200,
+      "sha256_rgba8": "f505a62b545f50d330b3f861d28034c847f230152f69ebe88409dfc18f41d400"
+    },
+    "lake": {
+      "width": 2048,
+      "height": 1365,
+      "sha256_rgba8": "7c7283a5284855b36fd5ee6a561f3047ad27eb71cba8ec8bcea7f5731ad434b1"
+    },
+    "portrait": {
+      "width": 1530,
+      "height": 2040,
+      "sha256_rgba8": "a60af4982eb33e6c32a5f5504ffd4782554de50d37c0c6dbdea07097ab1f2fe7"
+    },
+    "synthetic": {
+      "width": 512,
+      "height": 384,
+      "sha256_rgba8": "dd3895f0b24f9eb21e81a9b762f08e0699922d686240ab57563281b4dab5b584"
+    }
+  },
+  "cases": {
+    "flowers_cool": {
+      "answer_sha256": "26395bbac5211ebf3755dc5ca7f4e553d98d3b5e480121b3daefb197c198ec65",
+      "answer_scoring_sha256": "630c6e7cabf390254bd732c23a92b1320b7f738e1608dc919feab746065d6b2e",
+      "scoring_width": 1024,
+      "scoring_height": 768,
+      "players": {
+        "answer": {
+          "render_sha256": "26395bbac5211ebf3755dc5ca7f4e553d98d3b5e480121b3daefb197c198ec65",
+          "scoring_sha256": "630c6e7cabf390254bd732c23a92b1320b7f738e1608dc919feab746065d6b2e",
+          "score_json": "{\"correction_score\":100,\"raw_score\":100.0,\"perfect\":true,\"eligible\":true,\"d_e\":0.0,\"d_e_original\":8.200689198384984,\"mean_de\":0.0,\"tile_p95_max\":0.0,\"t_tile\":2.0,\"big_error_ratio\":0.0,\"leakage_penalty\":0.0,\"composition_score\":null,\"diagnostics\":{\"tone\":100,\"color\":100,\"detail\":null,\"local\":null,\"composition\":null},\"top_error_regions\":[],\"engine_version\":\"engine-0.1.0\",\"scoring_version\":\"scoring-0.1.0\"}"
+        },
+        "half": {
+          "render_sha256": "4d8ffe987536ff8886160036bbbba7522d75491f7fabf7e5f92260c2cb3e425c",
+          "scoring_sha256": "933fc142a7f7fdb44071d21807da0fc2796bfc460e6516f4c1ffa91a253acc9a",
+          "score_json": "{\"correction_score\":42,\"raw_score\":42.077499696855,\"perfect\":false,\"eligible\":true,\"d_e\":5.170819222763071,\"d_e_original\":8.200689198384984,\"mean_de\":5.170819222763071,\"tile_p95_max\":8.702308520192005,\"t_tile\":2.0,\"big_error_ratio\":0.557000478108724,\"leakage_penalty\":0.0,\"composition_score\":null,\"diagnostics\":{\"tone\":42,\"color\":45,\"detail\":null,\"local\":null,\"composition\":null},\"top_error_regions\":[],\"engine_version\":\"engine-0.1.0\",\"scoring_version\":\"scoring-0.1.0\"}"
+        },
+        "original": {
+          "render_sha256": "f505a62b545f50d330b3f861d28034c847f230152f69ebe88409dfc18f41d400",
+          "scoring_sha256": "6b39c1881d16c383cad19db6230168e9feb321e74379de04ea01671ab5a76e51",
+          "score_json": "{\"correction_score\":0,\"raw_score\":0.0,\"perfect\":false,\"eligible\":true,\"d_e\":8.200689198384984,\"d_e_original\":8.200689198384984,\"mean_de\":8.200689198384984,\"tile_p95_max\":15.198435033458667,\"t_tile\":2.0,\"big_error_ratio\":0.8432464599609375,\"leakage_penalty\":0.0,\"composition_score\":null,\"diagnostics\":{\"tone\":0,\"color\":0,\"detail\":null,\"local\":null,\"composition\":null},\"top_error_regions\":[],\"engine_version\":\"engine-0.1.0\",\"scoring_version\":\"scoring-0.1.0\"}"
+        }
+      }
+    },
+    "lake_warm": {
+      "answer_sha256": "2309f591e2d26b8eae3b12d7ea98a6906987801c752143b74852725a72e03819",
+      "answer_scoring_sha256": "20dfcd0cdc484a9aa27490cbe680b41fff012bdac70ece507183eaea9d22935e",
+      "scoring_width": 1024,
+      "scoring_height": 683,
+      "players": {
+        "answer": {
+          "render_sha256": "2309f591e2d26b8eae3b12d7ea98a6906987801c752143b74852725a72e03819",
+          "scoring_sha256": "20dfcd0cdc484a9aa27490cbe680b41fff012bdac70ece507183eaea9d22935e",
+          "score_json": "{\"correction_score\":100,\"raw_score\":100.0,\"perfect\":true,\"eligible\":true,\"d_e\":0.0,\"d_e_original\":4.321256568375018,\"mean_de\":0.0,\"tile_p95_max\":0.0,\"t_tile\":2.0,\"big_error_ratio\":0.0,\"leakage_penalty\":0.0,\"composition_score\":null,\"diagnostics\":{\"tone\":100,\"color\":100,\"detail\":null,\"local\":null,\"composition\":null},\"top_error_regions\":[],\"engine_version\":\"engine-0.1.0\",\"scoring_version\":\"scoring-0.1.0\"}"
+        },
+        "b100": {
+          "render_sha256": "52a5ba0643bc22465961743b985f8e4c126d1bb45bc385ac9be77e3f91a07e62",
+          "scoring_sha256": "6c27c63ddf3c2a243b50551da8bd72cfce3eab6a3121fdd01591c287a168f389",
+          "score_json": "{\"correction_score\":100,\"raw_score\":100.0,\"perfect\":true,\"eligible\":true,\"d_e\":0.38964661139850904,\"d_e_original\":4.321256568375018,\"mean_de\":0.38964661139850904,\"tile_p95_max\":1.0331455750521485,\"t_tile\":2.0,\"big_error_ratio\":0.0,\"leakage_penalty\":0.0,\"composition_score\":null,\"diagnostics\":{\"tone\":100,\"color\":100,\"detail\":null,\"local\":null,\"composition\":null},\"top_error_regions\":[],\"engine_version\":\"engine-0.1.0\",\"scoring_version\":\"scoring-0.1.0\"}"
+        },
+        "b98": {
+          "render_sha256": "efdc1b5ff721db6d0a3767bf0da011c97e02deebc36e0f1d1f083565d7e259ce",
+          "scoring_sha256": "088db4e5301875944d6c9e85b4ec521a8d80f535ab0310f2bd161e390d6ce9b4",
+          "score_json": "{\"correction_score\":98,\"raw_score\":98.03464393269705,\"perfect\":false,\"eligible\":true,\"d_e\":1.0652745174772562,\"d_e_original\":4.321256568375018,\"mean_de\":1.0652745174772562,\"tile_p95_max\":3.5439312784411086,\"t_tile\":2.0,\"big_error_ratio\":5.719253294289898e-6,\"leakage_penalty\":0.0,\"composition_score\":null,\"diagnostics\":{\"tone\":92,\"color\":100,\"detail\":null,\"local\":null,\"composition\":null},\"top_error_regions\":[],\"engine_version\":\"engine-0.1.0\",\"scoring_version\":\"scoring-0.1.0\"}"
+        },
+        "b99": {
+          "render_sha256": "67d8d403212e5afde769697ca6915be920c404a759ae793c6b0bbd2f51667009",
+          "scoring_sha256": "56f8c01eff86040829d337b55eb50504addb5c8aa5d8c502c438954aa0358df4",
+          "score_json": "{\"correction_score\":99,\"raw_score\":100.0,\"perfect\":false,\"eligible\":true,\"d_e\":0.7482972728287992,\"d_e_original\":4.321256568375018,\"mean_de\":0.7482972728287992,\"tile_p95_max\":2.3468496830201837,\"t_tile\":2.0,\"big_error_ratio\":0.0,\"leakage_penalty\":0.0,\"composition_score\":null,\"diagnostics\":{\"tone\":100,\"color\":100,\"detail\":null,\"local\":null,\"composition\":null},\"top_error_regions\":[],\"engine_version\":\"engine-0.1.0\",\"scoring_version\":\"scoring-0.1.0\"}"
+        },
+        "half": {
+          "render_sha256": "6ef41f43db9d48baa4a85066f28970f917702be8f26d15b38332e45af19d9185",
+          "scoring_sha256": "c0e05988a1957f824f29d3cb7528d5515d9c769de35e7d337cfa2300b7cd67bb",
+          "score_json": "{\"correction_score\":68,\"raw_score\":68.13144256169996,\"perfect\":false,\"eligible\":true,\"d_e\":2.0584365571659053,\"d_e_original\":4.321256568375018,\"mean_de\":2.0584365571659053,\"tile_p95_max\":3.9944302408502512,\"t_tile\":2.0,\"big_error_ratio\":0.000011438506588579795,\"leakage_penalty\":0.0,\"composition_score\":null,\"diagnostics\":{\"tone\":89,\"color\":59,\"detail\":null,\"local\":null,\"composition\":null},\"top_error_regions\":[],\"engine_version\":\"engine-0.1.0\",\"scoring_version\":\"scoring-0.1.0\"}"
+        },
+        "near": {
+          "render_sha256": "605bcecdc4836b5fa9e25c8536e5f803ca2b46ce9c0d6f2083c34a2d02a9f2ff",
+          "scoring_sha256": "4fd6980079234ce3090bc456a0f5973fe72f4617e3ae54927095b0cb12407296",
+          "score_json": "{\"correction_score\":96,\"raw_score\":96.46432511337927,\"perfect\":false,\"eligible\":true,\"d_e\":1.1174288344082768,\"d_e_original\":4.321256568375018,\"mean_de\":1.1174288344082768,\"tile_p95_max\":2.05879499144622,\"t_tile\":2.0,\"big_error_ratio\":0.00033600613103953146,\"leakage_penalty\":0.0,\"composition_score\":null,\"diagnostics\":{\"tone\":93,\"color\":100,\"detail\":null,\"local\":null,\"composition\":null},\"top_error_regions\":[],\"engine_version\":\"engine-0.1.0\",\"scoring_version\":\"scoring-0.1.0\"}"
+        },
+        "original": {
+          "render_sha256": "7c7283a5284855b36fd5ee6a561f3047ad27eb71cba8ec8bcea7f5731ad434b1",
+          "scoring_sha256": "4657645abc1848846ec005c5c8aea986fb7e4d24e242e3f30f9c4499cd897b70",
+          "score_json": "{\"correction_score\":0,\"raw_score\":0.0,\"perfect\":false,\"eligible\":true,\"d_e\":4.321256568375018,\"d_e_original\":4.321256568375018,\"mean_de\":4.321256568375018,\"tile_p95_max\":7.332243344415052,\"t_tile\":2.0,\"big_error_ratio\":0.5245942189787701,\"leakage_penalty\":0.0,\"composition_score\":null,\"diagnostics\":{\"tone\":0,\"color\":0,\"detail\":null,\"local\":null,\"composition\":null},\"top_error_regions\":[],\"engine_version\":\"engine-0.1.0\",\"scoring_version\":\"scoring-0.1.0\"}"
+        }
+      }
+    },
+    "portrait_bright": {
+      "answer_sha256": "7f666948fa63564ad49871001b0bdda629adcfef425d732e8e625ae9c74b31e4",
+      "answer_scoring_sha256": "21fb4462b415f95093721fd9b033657ce3c53a12f768c0f79436ba375c187607",
+      "scoring_width": 768,
+      "scoring_height": 1024,
+      "players": {
+        "answer": {
+          "render_sha256": "7f666948fa63564ad49871001b0bdda629adcfef425d732e8e625ae9c74b31e4",
+          "scoring_sha256": "21fb4462b415f95093721fd9b033657ce3c53a12f768c0f79436ba375c187607",
+          "score_json": "{\"correction_score\":100,\"raw_score\":100.0,\"perfect\":true,\"eligible\":true,\"d_e\":0.0,\"d_e_original\":11.199994510061224,\"mean_de\":0.0,\"tile_p95_max\":0.0,\"t_tile\":2.0,\"big_error_ratio\":0.0,\"leakage_penalty\":0.0,\"composition_score\":null,\"diagnostics\":{\"tone\":100,\"color\":100,\"detail\":null,\"local\":null,\"composition\":null},\"top_error_regions\":[],\"engine_version\":\"engine-0.1.0\",\"scoring_version\":\"scoring-0.1.0\"}"
+        },
+        "half": {
+          "render_sha256": "32e2ab074bb69ff7d1c808d38e7195e0b7d8211f0400e827005f308e7765c1c8",
+          "scoring_sha256": "0fb7837d0b095e91a6d839d1251e7eb44ecbc184d36a632287250f803c268e74",
+          "score_json": "{\"correction_score\":53,\"raw_score\":53.23963919570187,\"perfect\":false,\"eligible\":true,\"d_e\":5.76955423492323,\"d_e_original\":11.199994510061224,\"mean_de\":5.76955423492323,\"tile_p95_max\":11.174110655430606,\"t_tile\":2.0,\"big_error_ratio\":0.6578509012858073,\"leakage_penalty\":0.0,\"composition_score\":null,\"diagnostics\":{\"tone\":51,\"color\":69,\"detail\":null,\"local\":null,\"composition\":null},\"top_error_regions\":[],\"engine_version\":\"engine-0.1.0\",\"scoring_version\":\"scoring-0.1.0\"}"
+        },
+        "original": {
+          "render_sha256": "a60af4982eb33e6c32a5f5504ffd4782554de50d37c0c6dbdea07097ab1f2fe7",
+          "scoring_sha256": "e5250807d5882830c8f793e748c7611a0627359f40de3f97c97013cc1cb0f3d4",
+          "score_json": "{\"correction_score\":0,\"raw_score\":0.0,\"perfect\":false,\"eligible\":true,\"d_e\":11.199994510061224,\"d_e_original\":11.199994510061224,\"mean_de\":11.199994510061224,\"tile_p95_max\":16.349518294485673,\"t_tile\":2.0,\"big_error_ratio\":0.730614980061849,\"leakage_penalty\":0.0,\"composition_score\":null,\"diagnostics\":{\"tone\":0,\"color\":0,\"detail\":null,\"local\":null,\"composition\":null},\"top_error_regions\":[],\"engine_version\":\"engine-0.1.0\",\"scoring_version\":\"scoring-0.1.0\"}"
+        }
+      }
+    },
+    "synthetic_exposure": {
+      "answer_sha256": "7bd84c6876f54331d8555105c1c0ed22dce6f2a686b3ac7937cab60aa32eff99",
+      "answer_scoring_sha256": "7bd84c6876f54331d8555105c1c0ed22dce6f2a686b3ac7937cab60aa32eff99",
+      "scoring_width": 512,
+      "scoring_height": 384,
+      "players": {
+        "answer": {
+          "render_sha256": "7bd84c6876f54331d8555105c1c0ed22dce6f2a686b3ac7937cab60aa32eff99",
+          "scoring_sha256": "7bd84c6876f54331d8555105c1c0ed22dce6f2a686b3ac7937cab60aa32eff99",
+          "score_json": "{\"correction_score\":100,\"raw_score\":100.0,\"perfect\":true,\"eligible\":true,\"d_e\":0.0,\"d_e_original\":12.972027781302506,\"mean_de\":0.0,\"tile_p95_max\":0.0,\"t_tile\":2.0,\"big_error_ratio\":0.0,\"leakage_penalty\":0.0,\"composition_score\":null,\"diagnostics\":{\"tone\":100,\"color\":100,\"detail\":null,\"local\":null,\"composition\":null},\"top_error_regions\":[],\"engine_version\":\"engine-0.1.0\",\"scoring_version\":\"scoring-0.1.0\"}"
+        },
+        "half": {
+          "render_sha256": "bf5516bdce69202bb8e4dad1162baa236e1eb5cd81242d45adc1cf6b54b2fc06",
+          "scoring_sha256": "bf5516bdce69202bb8e4dad1162baa236e1eb5cd81242d45adc1cf6b54b2fc06",
+          "score_json": "{\"correction_score\":56,\"raw_score\":56.08547734852291,\"perfect\":false,\"eligible\":true,\"d_e\":6.2574588518612195,\"d_e_original\":12.972027781302506,\"mean_de\":6.2574588518612195,\"tile_p95_max\":8.592445669726576,\"t_tile\":2.0,\"big_error_ratio\":0.7730305989583334,\"leakage_penalty\":0.0,\"composition_score\":null,\"diagnostics\":{\"tone\":57,\"color\":49,\"detail\":null,\"local\":null,\"composition\":null},\"top_error_regions\":[],\"engine_version\":\"engine-0.1.0\",\"scoring_version\":\"scoring-0.1.0\"}"
+        },
+        "original": {
+          "render_sha256": "dd3895f0b24f9eb21e81a9b762f08e0699922d686240ab57563281b4dab5b584",
+          "scoring_sha256": "dd3895f0b24f9eb21e81a9b762f08e0699922d686240ab57563281b4dab5b584",
+          "score_json": "{\"correction_score\":0,\"raw_score\":0.0,\"perfect\":false,\"eligible\":true,\"d_e\":12.972027781302506,\"d_e_original\":12.972027781302506,\"mean_de\":12.972027781302506,\"tile_p95_max\":16.00523953310603,\"t_tile\":2.0,\"big_error_ratio\":0.9669901529947916,\"leakage_penalty\":0.0,\"composition_score\":null,\"diagnostics\":{\"tone\":0,\"color\":0,\"detail\":null,\"local\":null,\"composition\":null},\"top_error_regions\":[],\"engine_version\":\"engine-0.1.0\",\"scoring_version\":\"scoring-0.1.0\"}"
+        }
+      }
+    },
+    "synthetic_identity": {
+      "answer_sha256": "dd3895f0b24f9eb21e81a9b762f08e0699922d686240ab57563281b4dab5b584",
+      "answer_scoring_sha256": "dd3895f0b24f9eb21e81a9b762f08e0699922d686240ab57563281b4dab5b584",
+      "scoring_width": 512,
+      "scoring_height": 384,
+      "players": {
+        "answer": {
+          "render_sha256": "dd3895f0b24f9eb21e81a9b762f08e0699922d686240ab57563281b4dab5b584",
+          "scoring_sha256": "dd3895f0b24f9eb21e81a9b762f08e0699922d686240ab57563281b4dab5b584",
+          "score_json": "{\"correction_score\":0,\"raw_score\":0.0,\"perfect\":false,\"eligible\":false,\"d_e\":0.0,\"d_e_original\":0.0,\"mean_de\":0.0,\"tile_p95_max\":0.0,\"t_tile\":2.0,\"big_error_ratio\":0.0,\"leakage_penalty\":0.0,\"composition_score\":null,\"diagnostics\":{\"tone\":null,\"color\":null,\"detail\":null,\"local\":null,\"composition\":null},\"top_error_regions\":[],\"engine_version\":\"engine-0.1.0\",\"scoring_version\":\"scoring-0.1.0\"}"
+        },
+        "original": {
+          "render_sha256": "dd3895f0b24f9eb21e81a9b762f08e0699922d686240ab57563281b4dab5b584",
+          "scoring_sha256": "dd3895f0b24f9eb21e81a9b762f08e0699922d686240ab57563281b4dab5b584",
+          "score_json": "{\"correction_score\":0,\"raw_score\":0.0,\"perfect\":false,\"eligible\":false,\"d_e\":0.0,\"d_e_original\":0.0,\"mean_de\":0.0,\"tile_p95_max\":0.0,\"t_tile\":2.0,\"big_error_ratio\":0.0,\"leakage_penalty\":0.0,\"composition_score\":null,\"diagnostics\":{\"tone\":null,\"color\":null,\"detail\":null,\"local\":null,\"composition\":null},\"top_error_regions\":[],\"engine_version\":\"engine-0.1.0\",\"scoring_version\":\"scoring-0.1.0\"}"
+        }
+      }
+    }
+  },
+  "probes": {
+    "ineligible_64x48": {
+      "scoring_width": 64,
+      "scoring_height": 48,
+      "answer_scoring_sha256": "c0b0b2081782189d27bc68777059f17591d0f5e6c616a038d6929e4a9f1e433a",
+      "player_scoring_sha256": "9c3ae4ade4e8ddc9afd40d0e0ff4270e767e9e6ac69cbc954fe05f11fb5ecbaa",
+      "score_json": "{\"correction_score\":0,\"raw_score\":0.0,\"perfect\":false,\"eligible\":false,\"d_e\":0.4993438879724715,\"d_e_original\":0.5354315077022831,\"mean_de\":0.4993438879724715,\"tile_p95_max\":1.0334068592858507,\"t_tile\":2.0,\"big_error_ratio\":0.0,\"leakage_penalty\":0.0,\"composition_score\":null,\"diagnostics\":{\"tone\":null,\"color\":100,\"detail\":null,\"local\":null,\"composition\":null},\"top_error_regions\":[],\"engine_version\":\"engine-0.1.0\",\"scoring_version\":\"scoring-0.1.0\"}"
+    },
+    "noisy_1100x700": {
+      "scoring_width": 1024,
+      "scoring_height": 652,
+      "answer_scoring_sha256": "82eac2cbcebb7443ffdc29b0dbd5c558dd611fc221d5a11dd3403bc4c62e8042",
+      "player_scoring_sha256": "6e07c6e76ef6b732eae905638db272b7b988725e61f6ae796843de5899d345a0",
+      "score_json": "{\"correction_score\":85,\"raw_score\":85.31027780028423,\"perfect\":false,\"eligible\":true,\"d_e\":3.4907412315407336,\"d_e_original\":17.955672800871117,\"mean_de\":3.4907412315407336,\"tile_p95_max\":13.885852866406035,\"t_tile\":2.0,\"big_error_ratio\":0.1812452070552147,\"leakage_penalty\":0.0,\"composition_score\":null,\"diagnostics\":{\"tone\":80,\"color\":87,\"detail\":null,\"local\":null,\"composition\":null},\"top_error_regions\":[],\"engine_version\":\"engine-0.1.0\",\"scoring_version\":\"scoring-0.1.0\"}"
+    },
+    "perfect_300x200": {
+      "scoring_width": 300,
+      "scoring_height": 200,
+      "answer_scoring_sha256": "51986be887e09356002ef512305236bda028c837f6652e5b0cdaa9a1a639b4ca",
+      "player_scoring_sha256": "acf85d6136da6b762f0144d4db0de997fb433bab70805530a1f2c7859a64aabc",
+      "score_json": "{\"correction_score\":100,\"raw_score\":100.0,\"perfect\":true,\"eligible\":true,\"d_e\":0.3964541708935415,\"d_e_original\":18.130480553916193,\"mean_de\":0.3964541708935415,\"tile_p95_max\":1.2362981366884718,\"t_tile\":2.0,\"big_error_ratio\":0.0,\"leakage_penalty\":0.0,\"composition_score\":null,\"diagnostics\":{\"tone\":100,\"color\":100,\"detail\":null,\"local\":null,\"composition\":null},\"top_error_regions\":[],\"engine_version\":\"engine-0.1.0\",\"scoring_version\":\"scoring-0.1.0\"}"
+    },
+    "tile_gate_1100x700": {
+      "scoring_width": 1024,
+      "scoring_height": 652,
+      "answer_scoring_sha256": "82eac2cbcebb7443ffdc29b0dbd5c558dd611fc221d5a11dd3403bc4c62e8042",
+      "player_scoring_sha256": "5e191aeae7166774e3b8ce510027c49525355780f6b2b241c35ef428128cf57b",
+      "score_json": "{\"correction_score\":99,\"raw_score\":100.0,\"perfect\":false,\"eligible\":true,\"d_e\":0.9566523545263622,\"d_e_original\":17.955672800871117,\"mean_de\":0.9566523545263622,\"tile_p95_max\":4.292240037957128,\"t_tile\":2.0,\"big_error_ratio\":0.0006410563650306748,\"leakage_penalty\":0.0,\"composition_score\":null,\"diagnostics\":{\"tone\":100,\"color\":98,\"detail\":null,\"local\":null,\"composition\":null},\"top_error_regions\":[],\"engine_version\":\"engine-0.1.0\",\"scoring_version\":\"scoring-0.1.0\"}"
+    }
+  }
+}

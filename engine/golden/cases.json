@@ -1,0 +1,31 @@
+{
+  "images": {
+    "synthetic": "images/synthetic_512x384_baseline420.jpg",
+    "lake": "images/lake_2048x1365_baseline420.jpg",
+    "flowers": "images/flowers_1600x1200_baseline422.jpg",
+    "portrait": "images/portrait_1530x2040_progressive420.jpg"
+  },
+  "cases": [
+    { "name": "synthetic_identity", "image": "synthetic", "answer": "recipes/identity.json", "seed": 0, "eligible": false, "players": {} },
+    { "name": "synthetic_exposure", "image": "synthetic", "answer": "recipes/exposure_plus1.json", "seed": 1, "eligible": true,
+      "players": { "half": { "recipe": "recipes/player_exposure_half.json", "score": [1, 99] } } },
+    { "name": "lake_warm", "image": "lake", "answer": "recipes/warm_contrast.json", "seed": 2, "eligible": true,
+      "players": {
+        "half": { "recipe": "recipes/player_warm_half.json", "score": [1, 99] },
+        "near": { "recipe": "recipes/player_warm_near.json", "score": [1, 99] },
+        "b98": { "recipe": "recipes/player_warm_b98.json", "score": [98, 98] },
+        "b99": { "recipe": "recipes/player_warm_b99.json", "score": [99, 99] },
+        "b100": { "recipe": "recipes/player_warm_b100.json", "score": [100, 100] }
+      } },
+    { "name": "flowers_cool", "image": "flowers", "answer": "recipes/cool_fade.json", "seed": 3, "eligible": true,
+      "players": { "half": { "recipe": "recipes/player_cool_half.json", "score": [1, 99] } } },
+    { "name": "portrait_bright", "image": "portrait", "answer": "recipes/exposure_plus1.json", "seed": 4, "eligible": true,
+      "players": { "half": { "recipe": "recipes/player_exposure_half.json", "score": [1, 99] } } }
+  ],
+  "probes": [
+    { "name": "perfect_300x200", "width": 300, "height": 200, "shift": 40, "noise": 1, "score": [100, 100] },
+    { "name": "tile_gate_1100x700", "width": 1100, "height": 700, "shift": 40, "noise": 5, "score": [99, 99] },
+    { "name": "noisy_1100x700", "width": 1100, "height": 700, "shift": 40, "noise": 20, "score": [1, 98] },
+    { "name": "ineligible_64x48", "width": 64, "height": 48, "shift": 1, "noise": 3, "score": [0, 0] }
+  ]
+}
