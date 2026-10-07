@@ -54,27 +54,12 @@ process rss                    208.7 MiB
 
 ## Plan 1b-1 스테이지 프로파일 (2026-10-07)
 
-네이티브 release, (5회 중앙값), lake 2048×1365, 정답 , 플레이어 . Task 1(렌더 LUT)과 Task 2(ΔE 생략) 적용 후.
+네이티브 release, `score::tests::profile_scoring_stages`(5회 중앙값), lake 2048×1365, 정답 `warm_contrast`, 플레이어 `player_warm_near`. Task 1(렌더 LUT)과 Task 2(ΔE 생략) 적용 후.
 
-\
-running 1 test
-render 2048                 124.8 ms
-scoring_image               152.4 ms
-lab_image                    80.1 ms
-delta_e00 every pixel       282.5 ms
-delta_e_image               286.3 ms
-error_stats                  11.8 ms
-ScoringReference::new       754.2 ms
-distinct player colors    97101 of 699392
-pixels equal to answer    2249 (0.3%)
-test score::tests::profile_scoring_stages ... ok
+```bash
+cargo test --locked --release --manifest-path engine/Cargo.toml -p engine-core score::tests::profile_scoring_stages -- --ignored --nocapture
+```
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 169 filtered out; finished in 8.89s
-
-
-running 0 tests
-
-test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
 | 단계 | ms |
 |------|---:|
 | render 2048 | 129.3 |
@@ -87,4 +72,4 @@ test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; fini
 
 플레이어 채점 이미지의 서로 다른 색 97,101 / 699,392, 정답과 같은 픽셀 2,249(0.3%).
 
-해석: 채점의 약 55%가 ΔE00이다. 같은 픽셀 생략은 이 중간 점수 플레이어에서 이득이 없고(비교 비용만큼 약간 느림, wasm 채점 p50 724 → 708~716ms로 노이즈 범위) 만점에 가까운 제출에서만 줄어든다. 후보 C1( 16% < 시도 조건 20%)과 C3( 2% < 10%)은 시도하지 않았다.
+해석: 채점의 약 55%가 ΔE00이다. 같은 픽셀 생략은 이 중간 점수 플레이어에서 이득이 없고(비교 비용만큼 약간 느림, wasm 채점 p50 724 → 708~716ms로 노이즈 범위) 만점에 가까운 제출에서만 줄어든다. 후보 C1(`lab_image` 16% < 시도 조건 20%)과 C3(`error_stats` 2% < 10%)은 시도하지 않았다.
