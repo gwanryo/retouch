@@ -104,3 +104,95 @@ wasm(node) p50, 같은 기기:
 | 제출: 채점 | 700ms | 389~410ms |
 | 제출 합계 | 799ms | 492~508ms |
 | wasm 메모리 최댓값 | 109.0MiB | 109.0MiB |
+
+## Plan 1b-1 게이트 (2026-10-07~08)
+
+**판정: 조건부 PASS**(2026-10-08 사용자 결정). 데스크톱 GATE PASS 3/3, Galaxy S26 Ultra PASS(1회), Galaxy A12 FAIL(시간만, 메모리 PASS). 스펙 판정 기기(Galaxy A54, 중급)는 실측하지 못했고, 칩 세대로 보아 S26U보다 2~3배 느린 수준이라 제출 약 0.6~0.9초, 로드 약 0.7~1.1초로 추정한다(실측 아님). 보급형(A12급)은 v1 성능 보장 대상에서 빠진다(동작은 하지만 느림). 중급 실기기 최종 판정은 Plan 2와 분할 6 최대 복잡도 재검증에서 한다. 근거 기록: 스펙 변경 이력 v2.1.
+
+측정: 브라우저 Dedicated Worker(`engine/wasm/bench/web/`, `serve.mjs`, COOP/COEP), 로드 콜드 1 + 워밍 5, 제출 워밍업 1 + 20, 전환 10회(로드 → 제출 3 → 해제), 잔존 메모리는 시간 측정 뒤 별도 패스에서 `measureUserAgentSpecificMemory`. 결과 원본: `engine/wasm/bench/results/2026-10-07/`.
+
+피크 메모리는 wasm 선형 최댓값 + JS 할당 정책 지표(같은 단계 연속 두 반복의 할당 합)다. **정책 지표다**: "GC가 직전 반복의 버퍼까지는 회수하지 못해도 그 이전 것은 회수한다"는 가정 아래의 값이며 실제 피크의 상한을 보장하지 않는다(GC가 세 반복 이상 돌지 않으면 실제가 더 크다).
+
+### 최적화 전후 (node wasm, i7-10700K, p50)
+
+| 줄 | 1b-1 착수 시점(main af5df41, 같은 날 측정) | 1b-1 최종 |
+|----|---:|---:|
+| load: decode original jpeg | 38 | 40 |
+| load: decode answer png | 52 | 53 |
+| load: ScoringReference::new | 993 | 581 |
+| load: total | 1089 | 679 |
+| submit: render player 2048 | 1140 | 100 |
+| submit: score | 711 | 399 |
+| submit: total | 1855 | 502 |
+| wasm 메모리 최댓값 | 140.8MiB | 109.0MiB |
+
+(Plan 1a의 switch 줄은 제출 1회, 1b-1은 제출 3회라 비교하지 않는다.)
+
+### 기기별 (브라우저 Worker)
+
+| 기기 | 회차 | 로드 콜드 | 로드 워밍 p50 / p95 | 렌더 p50 | 채점 p50 | 제출 p50 / p95 | 피크 | 잔존 증가 |
+|------|------|---:|---:|---:|---:|---:|---:|---:|
+| i7-10700K Chrome 154 | C4 전 1 | 1196 | 1053 / 1074 | 97 | 691 | 786 / 795 | 219MiB | -1.8% |
+| i7-10700K Chrome 154 | 1 | 828 | 664 / 685 | 97 | 376 | 475 / 517 | 219MiB | -0.03% |
+| i7-10700K Chrome 154 | 2 | 854 | 663 / 684 | 98 | 392 | 493 / 520 | 219MiB | -0.05% |
+| i7-10700K Chrome 154 | 3 | 858 | 706 / 767 | 98 | 383 | 480 / 505 | 219MiB | +0.04% |
+| Galaxy S26 Ultra Chrome 154 | 1 | 489 | 349 / 352 | 52 | 239 | 291 / 298 | 219MiB | +0.02% |
+| Galaxy A12 Chrome 152 (RAM 2GB) | 1* | 7151 | 5107 / 5112 | 857 | 3041 | 3901 / 3973 | 219MiB | +0.02% |
+| Galaxy A12 Chrome 152 (RAM 2GB) | 2 | 7160 | 5141 / 5148 | 856 | 3019 | 3877 / 3910 | 219MiB | +0.03% |
+
+단위 ms, p50/p95는 nearest-rank(judge와 같은 식). *A12 1회차는 kind를 desktop으로 잘못 골랐다(측정값은 유효, 원본 보관). 모든 회차에서 탭 재로드·크래시 없음, wasm 메모리 증가 0.
+
+### judge.mjs 출력
+
+```
+$ node engine/wasm/bench/judge.mjs desktop desktop-chrome-run*.json
+INFO load_cold_ms 828.285000000149 - run1
+PASS submit_p95_ms 516.7800000011921 700 run1
+PASS load_p95_ms 684.6649999991059 1000 run1
+INFO peak_mib 219.08316230773926 - run1
+PASS wasm_growth 0 0.1 run1
+PASS wasm_monotonic not-strictly-increasing not-strictly-increasing run1
+PASS residual_growth -0.00028944515683848273 0.1 run1
+PASS residual_monotonic not-strictly-increasing not-strictly-increasing run1
+INFO load_cold_ms 853.7299999985844 - run2
+PASS submit_p95_ms 519.5499999988824 700 run2
+PASS load_p95_ms 684.2200000006706 1000 run2
+INFO peak_mib 219.08316230773926 - run2
+PASS wasm_growth 0 0.1 run2
+PASS wasm_monotonic not-strictly-increasing not-strictly-increasing run2
+PASS residual_growth -0.00047998297926417653 0.1 run2
+PASS residual_monotonic not-strictly-increasing not-strictly-increasing run2
+INFO load_cold_ms 858.3600000012666 - run3
+PASS submit_p95_ms 504.56000000052154 700 run3
+PASS load_p95_ms 767.2050000000745 1000 run3
+INFO peak_mib 219.08316230773926 - run3
+PASS wasm_growth 0 0.1 run3
+PASS wasm_monotonic not-strictly-increasing not-strictly-increasing run3
+PASS residual_growth 0.0003573577253739253 0.1 run3
+PASS residual_monotonic not-strictly-increasing not-strictly-increasing run3
+GATE PASS
+
+$ node engine/wasm/bench/judge.mjs mobile a12-chrome-run2.json
+INFO load_cold_ms 7160.135000000009 - run1
+FAIL submit_p95_ms 3909.5149999998976 2000 run1
+FAIL load_p95_ms 5147.945000000065 3000 run1
+PASS peak_mib 219.08316230773926 300 run1
+PASS wasm_growth 0 0.1 run1
+PASS wasm_monotonic not-strictly-increasing not-strictly-increasing run1
+PASS residual_growth 0.0003369572551498627 0.1 run1
+PASS residual_monotonic not-strictly-increasing not-strictly-increasing run1
+INFO runs 1 3 -
+GATE FAIL
+
+$ node engine/wasm/bench/judge.mjs mobile s26u-chrome-run1.json
+INFO load_cold_ms 489.21499997377396 - run1
+PASS submit_p95_ms 298.08999997377396 2000 run1
+PASS load_p95_ms 351.8299999833107 3000 run1
+PASS peak_mib 219.08316230773926 300 run1
+PASS wasm_growth 0 0.1 run1
+PASS wasm_monotonic not-strictly-increasing not-strictly-increasing run1
+PASS residual_growth 0.0001671071666497402 0.1 run1
+PASS residual_monotonic not-strictly-increasing not-strictly-increasing run1
+INFO runs 1 3 -
+GATE INCOMPLETE
+```
