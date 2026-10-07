@@ -1,12 +1,7 @@
-// Performance baseline for AC-S5a (Plan 1a measures only; the budget gate is Plan 1b's first
-// task). Three measurements, each with one warm-up run and RUNS timed runs, p50/p95 by nearest
-// rank:
-//   load    challenge load as in A8: decode the 2048 original JPEG, decode the answer PNG that
-//           engine-cli wrote, build the ScoringReference
-//   submit  one ScoringReference reused: render a 2048 player, score it
-//   switch  load + one submit + free, repeated; wasm linear memory must not keep growing
-// Every ImageData and ScoringReference is freed in `finally`, so memory numbers are working
-// memory, not garbage waiting for finalizers.
+// Node performance baseline (Plan 1a) on the shared gate scenario (scenario.mjs runGate, master
+// plan §4.1 counts: load cold 1 + warm 5, submit warm-up 1 + 20, switch 10 with 3 submits each).
+// The browser Worker gate uses the same scenario (web/worker.mjs); this script keeps the Plan 1a
+// line names, values are p50/p95 by nearest rank over the warm load, submit and switch samples.
 // Usage (repository root):
 //   wasm-pack build engine/wasm --target nodejs --release -- --locked
 //   cargo run --locked --release --manifest-path engine/Cargo.toml -p engine-cli -- gen-answer \
@@ -16,93 +11,51 @@
 import { existsSync, readFileSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
+import { COUNTS, pct, runGate } from './scenario.mjs'
+import { gitHead, harnessSha256 } from './serve.mjs'
 
-const RUNS = 7
 const here = dirname(fileURLToPath(import.meta.url))
 const engine = resolve(here, '../..')
 const wasm = await import(pathToFileURL(resolve(here, '../pkg/engine_wasm.js')).href)
 const read = (p) => new Uint8Array(readFileSync(resolve(engine, p)))
 const answerPng = 'target/perf/answer_2048.png'
 if (!existsSync(resolve(engine, answerPng))) throw new Error(`engine/${answerPng} missing: run engine-cli gen-answer first (see header)`)
-const jpeg = read('golden/images/lake_2048x1365_baseline420.jpg')
-const png = read(answerPng)
-const playerRecipe = readFileSync(resolve(engine, 'golden/recipes/player_warm_near.json'), 'utf8')
 const MiB = (bytes) => (bytes / 2 ** 20).toFixed(1)
 
-const times = {}
-const time = (label, f) => {
-  const t0 = performance.now()
-  const r = f()
-  ;(times[label] ??= []).push(performance.now() - t0)
-  return r
+const inputs = {
+  jpeg: read('golden/images/lake_2048x1365_baseline420.jpg'),
+  answerPng: read(answerPng),
+  playerRecipe: readFileSync(resolve(engine, 'golden/recipes/player_warm_near.json'), 'utf8'),
+  regionJson: '{"kind":"full"}',
+  seed: 0,
+  compositionJson: null,
 }
+const r = await runGate(wasm, inputs, {
+  now: () => performance.now(),
+  wasmSha256: wasm.sha256_hex(read('wasm/pkg/engine_wasm_bg.wasm')),
+  harness: { commit: gitHead(), sha256: harnessSha256() },
+  kind: 'desktop',
+  runId: crypto.randomUUID(),
+})
 
-/** Decode with the engine, copy the pixels out once, free the wasm object. */
-const decode = (bytes) => {
-  const img = wasm.decode_image(bytes)
-  try {
-    return { width: img.width, height: img.height, rgba: img.rgba }
-  } finally {
-    img.free()
-  }
+const lines = {
+  'load: decode original jpeg': r.load.warm.decodeOriginal,
+  'load: decode answer png': r.load.warm.decodeAnswer,
+  'load: ScoringReference::new': r.load.warm.reference,
+  'load: total': r.load.warm.total,
+  'submit: render player 2048': r.submit.render,
+  'submit: score': r.submit.score,
+  'submit: total': r.submit.total,
+  'switch: load+submit+free': r.switch.ms,
 }
-
-/** Challenge load (A8). Returns the reference and the original pixels the submit step needs. */
-const load = () =>
-  time('load: total', () => {
-    const src = time('load: decode original jpeg', () => decode(jpeg))
-    const answer = time('load: decode answer png', () => decode(png))
-    const reference = time('load: ScoringReference::new', () =>
-      new wasm.ScoringReference(src.width, src.height, src.rgba, answer.rgba, '{"kind":"full"}'))
-    return { src, reference }
-  })
-
-const submit = ({ src, reference }) =>
-  time('submit: total', () => {
-    const player = time('submit: render player 2048', () =>
-      wasm.render_rgba8(src.width, src.height, src.rgba, playerRecipe, 0))
-    return time('submit: score', () => reference.score(player, null))
-  })
-
-const repeat = (f) => {
-  f() // warm-up (JIT, memory growth); not recorded
-  for (const k of Object.keys(times)) delete times[k]
-  for (let i = 0; i < RUNS; i++) f()
-  return { ...times }
-}
-
-const freeAfter = (f) => () => {
-  const challenge = load()
-  try {
-    f(challenge)
-  } finally {
-    challenge.reference.free()
-  }
-}
-
-const results = {}
-Object.assign(results, repeat(freeAfter(() => {})))
-const memAfterLoad = wasm.memory_bytes()
-const challenge = load()
-try {
-  Object.assign(results, repeat(() => submit(challenge)))
-} finally {
-  challenge.reference.free()
-}
-const memBeforeSwitch = wasm.memory_bytes()
-const switchTimes = repeat(() => time('switch: load+submit+free', freeAfter(submit)))
-results['switch: load+submit+free'] = switchTimes['switch: load+submit+free']
-const memAfterSwitch = wasm.memory_bytes()
-
-const pct = (xs, p) => {
-  const s = [...xs].sort((a, b) => a - b)
-  return s[Math.max(1, Math.ceil(p * s.length)) - 1]
-}
-console.log(`runs=${RUNS} node=${process.version}`)
-for (const [label, xs] of Object.entries(results)) {
+const c = COUNTS
+console.log(`runs: load warm ${c.loadWarm}, submit ${c.submit}, switch ${c.switch} (x${c.submitsPerSwitch} submits) node=${process.version}`)
+for (const [label, xs] of Object.entries(lines)) {
   console.log(`${label.padEnd(30)} p50 ${pct(xs, 0.5).toFixed(0).padStart(5)} ms   p95 ${pct(xs, 0.95).toFixed(0).padStart(5)} ms`)
 }
-console.log(`wasm memory after load runs    ${MiB(memAfterLoad)} MiB`)
-console.log(`wasm memory after submit runs  ${MiB(memBeforeSwitch)} MiB`)
-console.log(`wasm memory after switch runs  ${MiB(memAfterSwitch)} MiB (growth during switch ${MiB(memAfterSwitch - memBeforeSwitch)} MiB)`)
+const after = r.switch.wasmBytesAfter
+console.log(`load cold                      ${r.load.cold.total.toFixed(0)} ms`)
+console.log(`wasm memory peak               ${MiB(r.memory.wasmPeakBytes)} MiB`)
+console.log(`wasm memory after switch 1/10  ${MiB(after[0])} / ${MiB(after.at(-1))} MiB`)
+console.log(`js alloc two-rep (policy)      ${MiB(r.memory.jsAllocTwoRepBytes)} MiB`)
 console.log(`process rss                    ${MiB(process.memoryUsage().rss)} MiB`)
