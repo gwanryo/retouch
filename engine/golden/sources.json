@@ -1,10 +1,11 @@
 {
   "license_check": "Wikimedia Commons API extmetadata.LicenseShortName == \"CC0\" (CC0 1.0), read 2026-10-04",
-  "generator": {
-    "about": "engine-cli build that produced the processed files below (fixture, prep-photo)",
-    "commit": "f581ee0e5e13c033428651665281595e2466e51b",
-    "cargo_lock_sha256": "68ea93d2b180846ff1961ecd53c989fa27782fa9b72c079cda72e2f72e246345"
+  "history": {
+    "generator_commit": "f581ee0e5e13c033428651665281595e2466e51b",
+    "generator_cargo_lock_sha256": "68ea93d2b180846ff1961ecd53c989fa27782fa9b72c079cda72e2f72e246345",
+    "note": "PR #4 branch commit, squash-merged into main af5df41; kept for the record, not verified"
   },
+  "reproduce_note": "Processed files are verified by regenerating them with the current engine-cli and comparing SHA-256 (verify-sources.mjs --processed). CI regenerates the source-free fixture on every run; prep-photo files need the downloaded source (see processing). reproduce records the last successful regeneration for audit; it is not compared with HEAD.",
   "files": {
     "images/flowers_1600x1200_baseline422.jpg": {
       "sha256": "9402a680387806d83fc98118a4a432225740bae3f4ee22eb7b5f8119b4e97657",
@@ -19,12 +20,28 @@
     "images/lake_2048x1365_baseline420.jpg": {
       "sha256": "11a19957737f821fa2cedc488ed4663048e7f74358d7935e151c92f5aa562a0f",
       "source": "lake",
-      "processing": "engine-cli prep-photo --input <lake source> --long-edge 2048 --quality 90 --output images/lake_2048x1365_baseline420.jpg"
+      "processing": "engine-cli prep-photo --input <lake source> --long-edge 2048 --quality 90 --output images/lake_2048x1365_baseline420.jpg",
+      "reproduce": {
+        "how": "manual",
+        "last_ok": "2026-10-07",
+        "engine_version": "engine-0.1.0",
+        "engine_tree": "a50dbb0a5cb4507f646db664c3110312402ecafe",
+        "cargo_lock_sha256": "68ea93d2b180846ff1961ecd53c989fa27782fa9b72c079cda72e2f72e246345",
+        "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)"
+      }
     },
     "images/synthetic_512x384_baseline420.jpg": {
       "sha256": "db96b85ade61f3ae2a2604453c31bbaaf83cc2cf946164348ee68cf5d4bce0f8",
       "source": null,
-      "processing": "engine-cli fixture --out-dir <tmp> --width 512 --height 384, then fixture.jpg"
+      "processing": "engine-cli fixture --out-dir <tmp> --width 512 --height 384, then fixture.jpg",
+      "reproduce": {
+        "how": "ci",
+        "last_ok": "2026-10-07",
+        "engine_version": "engine-0.1.0",
+        "engine_tree": "a50dbb0a5cb4507f646db664c3110312402ecafe",
+        "cargo_lock_sha256": "68ea93d2b180846ff1961ecd53c989fa27782fa9b72c079cda72e2f72e246345",
+        "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)"
+      }
     }
   },
   "sources": {
