@@ -146,6 +146,28 @@ fn lab_image(img: &Rgba8) -> Vec<Lab> {
         .collect()
 }
 
+/// Per-pixel ΔE00 between two scoring images in pixel order. A pixel whose RGB bytes are equal
+/// has equal Lab, and ΔE00 of equal Lab is exactly `+0.0` (exhaustively tested in `color`), so
+/// it is skipped; the value at every position is bit-identical to calling `delta_e00`.
+fn delta_e_image<'a>(
+    a: &'a Rgba8,
+    lab_a: &'a [Lab],
+    b: &'a Rgba8,
+    lab_b: &'a [Lab],
+) -> impl Iterator<Item = f64> + 'a {
+    a.data()
+        .chunks_exact(4)
+        .zip(b.data().chunks_exact(4))
+        .zip(lab_a.iter().zip(lab_b))
+        .map(|((pa, pb), (la, lb))| {
+            if pa[..3] == pb[..3] {
+                0.0
+            } else {
+                delta_e00(*la, *lb)
+            }
+        })
+}
+
 fn mean_over(values: impl Iterator<Item = f64>, mask: &RegionMask) -> f64 {
     let (sum, n) = values
         .enumerate()
@@ -204,7 +226,10 @@ impl ScoringReference {
         let lab_answer = lab_image(&answer_scoring);
         let lab_o = lab_image(&original_scoring);
         let pairs = || lab_o.iter().zip(&lab_answer);
-        let d_e_original = mean_over(pairs().map(|(o, a)| delta_e00(*o, *a)), &mask);
+        let d_e_original = mean_over(
+            delta_e_image(&original_scoring, &lab_o, &answer_scoring, &lab_answer),
+            &mask,
+        );
         let dl_original = mean_over(pairs().map(|(o, a)| (o.l - a.l).abs()), &mask);
         let dc_original = mean_over(
             pairs().map(|(o, a)| libm::hypot(o.a - a.a, o.b - a.b)),
@@ -246,11 +271,13 @@ impl ScoringReference {
         check_size(player, self.width, self.height)?;
         let player_scoring = scoring_image(player, crate::SCORING_LONG_EDGE)?;
         let lab_p = lab_image(&player_scoring);
-        let de: Vec<f64> = lab_p
-            .iter()
-            .zip(&self.lab_answer)
-            .map(|(p, a)| delta_e00(*p, *a))
-            .collect();
+        let de: Vec<f64> = delta_e_image(
+            &player_scoring,
+            &lab_p,
+            &self.answer_scoring,
+            &self.lab_answer,
+        )
+        .collect();
         let stats = error_stats(&de, &self.mask)?;
         let v = verdict(&stats, self.d_e_original);
         let pairs = || lab_p.iter().zip(&self.lab_answer);
@@ -555,5 +582,131 @@ mod tests {
             .collect();
         assert!(positions.windows(2).all(|p| p[0] < p[1]), "{json}");
         assert!(json.contains(r#""top_error_regions":[]"#) && json.contains(r#""detail":null"#));
+    }
+
+    /// Left half from `left`, right half from `right` (same size).
+    fn half_and_half(left: &Rgba8, right: &Rgba8) -> Rgba8 {
+        let w = left.width() as usize;
+        let data = left
+            .data()
+            .chunks_exact(4)
+            .zip(right.data().chunks_exact(4))
+            .enumerate()
+            .flat_map(|(i, (l, r))| {
+                if i % w < w / 2 {
+                    l.to_vec()
+                } else {
+                    r.to_vec()
+                }
+            })
+            .collect();
+        Rgba8::new(left.width(), left.height(), data).unwrap()
+    }
+
+    #[test]
+    fn delta_e_image_matches_naive_bitwise() {
+        let a = gradient(64, 48);
+        let shifted = with_exposure(&a, 0.8);
+        for (b, equal_pixels) in [
+            (a.clone(), 3072),
+            (shifted.clone(), 0),
+            (half_and_half(&a, &shifted), 1536),
+        ] {
+            let (sa, sb) = (
+                scoring_image(&a, 1024).unwrap(),
+                scoring_image(&b, 1024).unwrap(),
+            );
+            let (la, lb) = (lab_image(&sa), lab_image(&sb));
+            let same = sa
+                .data()
+                .chunks_exact(4)
+                .zip(sb.data().chunks_exact(4))
+                .filter(|(p, q)| p[..3] == q[..3])
+                .count();
+            assert_eq!(same, equal_pixels);
+            let fast: Vec<u64> = delta_e_image(&sa, &la, &sb, &lb)
+                .map(f64::to_bits)
+                .collect();
+            let naive: Vec<u64> = la
+                .iter()
+                .zip(&lb)
+                .map(|(x, y)| delta_e00(*x, *y).to_bits())
+                .collect();
+            assert_eq!(fast, naive);
+        }
+    }
+
+    /// Stage timings on the 2048×1365 golden photo (Plan 1b-1 Task 2 Step 0). Median of 5.
+    #[test]
+    #[ignore = "profiling; run with --release -- --ignored --nocapture"]
+    fn profile_scoring_stages() {
+        use std::collections::HashSet;
+        use std::time::Instant;
+
+        let root = concat!(env!("CARGO_MANIFEST_DIR"), "/../golden");
+        let read = |p: &str| std::fs::read(format!("{root}/{p}")).unwrap();
+        let recipe = |p: &str| Recipe::from_json(&String::from_utf8(read(p)).unwrap()).unwrap();
+        let median = |label: &str, f: &mut dyn FnMut()| {
+            let mut ms: Vec<f64> = (0..5)
+                .map(|_| {
+                    let t = Instant::now();
+                    f();
+                    t.elapsed().as_secs_f64() * 1e3
+                })
+                .collect();
+            ms.sort_by(f64::total_cmp);
+            println!("{label:<24} {:>8.1} ms", ms[2]);
+        };
+        let ctx = RenderContext::default();
+        let src =
+            crate::decode::decode_rgba8(&read("images/lake_2048x1365_baseline420.jpg")).unwrap();
+        let answer = render_rgba8(&src, &recipe("recipes/warm_contrast.json"), &ctx).unwrap();
+        let player_recipe = recipe("recipes/player_warm_near.json");
+
+        let mut player = None;
+        median("render 2048", &mut || {
+            player = Some(render_rgba8(&src, &player_recipe, &ctx).unwrap());
+        });
+        let player = player.unwrap();
+        let mut ps = None;
+        median("scoring_image", &mut || {
+            ps = Some(scoring_image(&player, 1024).unwrap());
+        });
+        let ps = ps.unwrap();
+        let sa = scoring_image(&answer, 1024).unwrap();
+        let mut lp = Vec::new();
+        median("lab_image", &mut || lp = lab_image(&ps));
+        let la = lab_image(&sa);
+        let mut de = Vec::new();
+        median("delta_e00 every pixel", &mut || {
+            de = lp.iter().zip(&la).map(|(p, a)| delta_e00(*p, *a)).collect();
+        });
+        median("delta_e_image", &mut || {
+            de = delta_e_image(&ps, &lp, &sa, &la).collect();
+        });
+        let mask = FULL.rasterize(ps.width(), ps.height()).unwrap();
+        median("error_stats", &mut || {
+            error_stats(&de, &mask).unwrap();
+        });
+        median("ScoringReference::new", &mut || {
+            ScoringReference::new(&src, &answer, &FULL).unwrap();
+        });
+        let colors: HashSet<[u8; 3]> = ps
+            .data()
+            .chunks_exact(4)
+            .map(|p| [p[0], p[1], p[2]])
+            .collect();
+        let same = ps
+            .data()
+            .chunks_exact(4)
+            .zip(sa.data().chunks_exact(4))
+            .filter(|(p, q)| p[..3] == q[..3])
+            .count();
+        let n = ps.data().len() / 4;
+        println!("distinct player colors    {} of {n}", colors.len());
+        println!(
+            "pixels equal to answer    {same} ({:.1}%)",
+            100.0 * same as f64 / n as f64
+        );
     }
 }

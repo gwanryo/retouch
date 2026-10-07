@@ -51,3 +51,40 @@ process rss                    208.7 MiB
 ## 해석
 
 제출 p50은 1805ms로 2000ms 미만이지만, 이는 데스크톱 Node 기준이며 모바일·브라우저 Worker 적합성은 입증하지 않는다. 예산 판정은 Plan 1b 첫 태스크 게이트가 이 값을 입력으로 받아 수행한다. 검증 실행에서는 제출 p50 1767ms, 로드 1031ms, 메모리 140.8MiB였고 이번 값과 편차 범위 안이다.
+
+## Plan 1b-1 스테이지 프로파일 (2026-10-07)
+
+네이티브 release, (5회 중앙값), lake 2048×1365, 정답 , 플레이어 . Task 1(렌더 LUT)과 Task 2(ΔE 생략) 적용 후.
+
+\
+running 1 test
+render 2048                 124.8 ms
+scoring_image               152.4 ms
+lab_image                    80.1 ms
+delta_e00 every pixel       282.5 ms
+delta_e_image               286.3 ms
+error_stats                  11.8 ms
+ScoringReference::new       754.2 ms
+distinct player colors    97101 of 699392
+pixels equal to answer    2249 (0.3%)
+test score::tests::profile_scoring_stages ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 169 filtered out; finished in 8.89s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+| 단계 | ms |
+|------|---:|
+| render 2048 | 129.3 |
+| scoring_image | 152.5 |
+| lab_image (플레이어 1024) | 86.7 |
+| ΔE00 전 픽셀 | 302.6 |
+| delta_e_image (같은 픽셀 생략) | 329.4 |
+| error_stats | 12.3 |
+| ScoringReference::new | 782.5 |
+
+플레이어 채점 이미지의 서로 다른 색 97,101 / 699,392, 정답과 같은 픽셀 2,249(0.3%).
+
+해석: 채점의 약 55%가 ΔE00이다. 같은 픽셀 생략은 이 중간 점수 플레이어에서 이득이 없고(비교 비용만큼 약간 느림, wasm 채점 p50 724 → 708~716ms로 노이즈 범위) 만점에 가까운 제출에서만 줄어든다. 후보 C1( 16% < 시도 조건 20%)과 C3( 2% < 10%)은 시도하지 않았다.

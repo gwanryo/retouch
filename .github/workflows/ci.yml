@@ -78,6 +78,8 @@ jobs:
         run: cargo clippy --locked --manifest-path engine/Cargo.toml --workspace --all-targets -- -D warnings
       - name: Test (native, debug)
         run: cargo test --locked --manifest-path engine/Cargo.toml --workspace
+      - name: Exhaustive properties (release)
+        run: cargo test --locked --release --manifest-path engine/Cargo.toml -p engine-core -- --ignored exhaustive_
       - name: Clippy (wasm32)
         run: cargo clippy --locked --manifest-path engine/Cargo.toml -p engine-wasm --all-targets --target wasm32-unknown-unknown -- -D warnings
       - uses: actions/setup-node@v4
