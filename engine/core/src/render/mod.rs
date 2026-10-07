@@ -109,15 +109,21 @@ pub fn render(
     _ctx: &RenderContext, // seed is consumed by grain from Plan 1b
 ) -> Result<ImageF32, RenderError> {
     let r = recipe.recipe();
-    if let Some(feature) = unsupported_feature(r) {
-        return Err(RenderError::NotYetSupported {
-            feature,
-            plan: "Plan 1b",
-        });
-    }
+    reject_unsupported(r)?;
     let b = &r.basic;
     let out = src.map_pixels(|px| global_encoded(linear_stage(px.map(srgb_decode), b), b));
     finite(out)
+}
+
+/// Both entry points refuse the same features, never silently ignoring them.
+fn reject_unsupported(r: &Recipe) -> Result<(), RenderError> {
+    match unsupported_feature(r) {
+        Some(feature) => Err(RenderError::NotYetSupported {
+            feature,
+            plan: "Plan 1b",
+        }),
+        None => Ok(()),
+    }
 }
 
 /// Stages 2-3 for one linear pixel: exposure, white balance, back to encoded.
@@ -163,12 +169,7 @@ pub(crate) fn render_rgba8_f32(
     _ctx: RenderContext, // seed is consumed by grain from Plan 1b
 ) -> Result<ImageF32, RenderError> {
     let r = recipe.recipe();
-    if let Some(feature) = unsupported_feature(r) {
-        return Err(RenderError::NotYetSupported {
-            feature,
-            plan: "Plan 1b",
-        });
-    }
+    reject_unsupported(r)?;
     let b = &r.basic;
     let lut = linear_stage_lut(b);
     let samples = src
