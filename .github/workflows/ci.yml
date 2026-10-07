@@ -63,7 +63,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0 # 01a-4: the golden guard reads expected.json and Cargo.lock at the base commit, verify-sources reads the generator commit
+          fetch-depth: 0 # 01a-4: the golden guard reads expected.json and Cargo.lock at the base commit
       - name: Install pinned toolchain (matches rust-toolchain.toml)
         run: rustup toolchain install 1.98.1 --profile minimal --component clippy,rustfmt --target wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
@@ -105,8 +105,15 @@ jobs:
           done
       - name: Golden sources script tests
         run: node --test engine/golden/test/verify-sources.test.mjs
-      - name: Golden sources intact (needs fetch-depth 0 for the generator commit)
+      - name: Golden sources intact
         run: node engine/golden/verify-sources.mjs
+      - name: Golden processed fixture reproduces
+        shell: bash
+        run: |
+          set -euo pipefail
+          TMP=$(mktemp -d)
+          cargo run --locked --release --manifest-path engine/Cargo.toml -p engine-cli -- fixture --out-dir "$TMP" --width 512 --height 384
+          node engine/golden/verify-sources.mjs --processed images/synthetic_512x384_baseline420.jpg "$TMP/fixture.jpg"
       - name: Golden (native, debug)
         run: cargo run --locked --manifest-path engine/Cargo.toml -p engine-cli -- golden check --dir engine/golden --actual-out engine/golden/actual-native-debug.json
       - name: Golden (native, release)
