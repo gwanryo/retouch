@@ -138,20 +138,15 @@ export const runGate = async (wasm, inputs, opts) => {
 
   // Submit warm-up: a fresh load and one unrecorded submit; the 20 samples reuse its reference.
   let challenge
-  stage(1, (rec) => {
-    challenge = load(wasm, inputs, rec)
-    try {
-      submit(wasm, inputs, challenge, rec)
-    } catch (e) {
-      challenge.reference.free()
-      throw e
-    }
-  })
   let submits
   try {
+    stage(1, (rec) => {
+      challenge = load(wasm, inputs, rec)
+      submit(wasm, inputs, challenge, rec)
+    })
     submits = stage(COUNTS.submit, (rec) => submit(wasm, inputs, challenge, rec))
   } finally {
-    challenge.reference.free()
+    challenge?.reference.free()
   }
 
   const switchMs = []
@@ -195,6 +190,7 @@ export const runGate = async (wasm, inputs, opts) => {
 
 const HEX64 = /^[0-9a-f]{64}$/
 const isObject = (v) => typeof v === 'object' && v !== null && !Array.isArray(v)
+const isText = (v) => typeof v === 'string' && v.length > 0
 const isTime = (v) => typeof v === 'number' && Number.isFinite(v) && v >= 0
 const isBytes = (v) => Number.isInteger(v) && v > 0
 
@@ -227,7 +223,7 @@ export const validateResult = (r) => {
     for (const k of ['engine', 'scoring', 'wasmSha256', 'harness', 'inputs', 'seed', 'regionJson', 'compositionJson', 'counts']) {
       need(Object.hasOwn(run, k), `run.${k} missing`)
     }
-    need(run.engine != null && run.scoring != null, 'run.engine/scoring missing')
+    need(isText(run.engine) && isText(run.scoring), 'run.engine/scoring missing')
     need(HEX64.test(run.wasmSha256), 'run.wasmSha256 not a sha256')
     need(isObject(run.harness) && typeof run.harness.commit === 'string' && HEX64.test(run.harness.sha256), 'run.harness invalid')
     for (const k of ['jpeg', 'answerPng', 'playerRecipe']) need(isObject(run.inputs) && HEX64.test(run.inputs[k]), `run.inputs.${k} not a sha256`)
@@ -273,6 +269,8 @@ export const validateResult = (r) => {
     else errors.push('memory.residual.source must be ua, manual or null')
   }
   need(isObject(r.env), 'env missing')
+  need(isText(r.env?.device), 'env.device missing (enter the device name before running)')
+  need(typeof r.env?.userAgent === 'string', 'env.userAgent missing')
   need(Array.isArray(r.incidents) && r.incidents.every((s) => typeof s === 'string'), 'incidents must be strings')
   return errors
 }
@@ -280,7 +278,7 @@ export const validateResult = (r) => {
 // ---------------------------------------------------------------------------------------------
 // Judgement
 
-const fmt = (v) => (Number.isInteger(v) ? String(v) : v.toFixed(4))
+const fmt = (v) => String(v) // full precision: a boundary miss must be visible
 
 /**
  * Judge results of one kind against budget.json. Order is fixed; the first stage that fails

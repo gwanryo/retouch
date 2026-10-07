@@ -62,10 +62,16 @@ export const answerProbe = async (msg, env, post, limitMs) => {
  * Worker side: ask the page for a reading and wait for the result with the same id.
  * `onMessage(listener)` subscribes and returns an unsubscribe function.
  */
-export const awaitProbe = (post, onMessage, id) =>
+export const awaitProbe = (post, onMessage, id, limitMs = 40000) =>
   new Promise((resolve) => {
+    // Longer than the page's own 30 s limit, so this only fires if the page never answers.
+    const timer = setTimeout(() => {
+      off()
+      resolve({ bytes: null, reason: 'no-answer' })
+    }, limitMs)
     const off = onMessage((m) => {
       if (m?.type !== 'probe-result' || m.id !== id) return
+      clearTimeout(timer)
       off()
       resolve({ bytes: m.bytes, reason: m.reason })
     })

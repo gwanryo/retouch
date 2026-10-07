@@ -8,6 +8,9 @@ import { dirname, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { COUNTS, pct, runGate, switchOnce, validateResult } from '../scenario.mjs'
 
+/** The fields the Worker and page add to runGate's result before it is saved. */
+const withPageEnv = (r) => ({ ...r, env: { ...r.env, userAgent: 'node', device: 'test device' } })
+
 const here = dirname(fileURLToPath(import.meta.url))
 
 /** Fake wasm module. Every object throws on a second free(); `live()` counts unfreed objects. */
@@ -107,7 +110,7 @@ test('S2 runGate takes the planned samples and frees everything', async () => {
   assert.equal(count(fake.calls, 'decode_image'), 34)
   assert.equal(count(fake.calls, 'render_rgba8'), 51)
   assert.equal(count(fake.calls, 'score'), 51)
-  assert.deepEqual(validateResult(r), [])
+  assert.deepEqual(validateResult(withPageEnv(r)), [])
 })
 
 test('S2b switchOnce loads, submits three times and frees', () => {
@@ -185,5 +188,5 @@ test('S8 runGate on the real nodejs wasm with a tiny image', { skip: fixtureDir 
     compositionJson: null,
   }
   const r = await runGate(wasm, inputs, { ...opts(), now: () => performance.now() })
-  assert.deepEqual(validateResult(r), [])
+  assert.deepEqual(validateResult(withPageEnv(r)), [])
 })

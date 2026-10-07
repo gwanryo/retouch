@@ -83,3 +83,14 @@ test('P7 awaitProbe ignores other ids', async () => {
   assert.deepEqual(await p, { bytes: 2, reason: null })
   assert.equal(listeners.size, 0)
 })
+
+test('P8 awaitProbe gives up when the page never answers', async () => {
+  const listeners = new Set()
+  const onMessage = (l) => {
+    listeners.add(l)
+    return () => listeners.delete(l)
+  }
+  const r = await awaitProbe(() => {}, onMessage, 1, 10)
+  assert.deepEqual(r, { bytes: null, reason: 'no-answer' })
+  assert.equal(listeners.size, 0)
+})

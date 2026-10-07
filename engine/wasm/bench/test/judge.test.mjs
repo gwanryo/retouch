@@ -202,6 +202,9 @@ test('J21 invalid results -> FAIL', () => {
     'inputs.jpeg h100': (r) => { r.run.inputs.jpeg = 'h100' },
     'no runId': (r) => { delete r.runId },
     'no run': (r) => { delete r.run },
+    'env.device empty': (r) => { r.env.device = '' },
+    'env.device missing': (r) => { delete r.env.device },
+    'run.engine empty': (r) => { r.run.engine = '' },
   }
   for (const [name, patch] of Object.entries(cases)) {
     const results = three()

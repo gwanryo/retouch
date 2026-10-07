@@ -46,7 +46,9 @@ const charging = async () => {
 
 const onWorkerMessage = async (m) => {
   if (m.type === 'progress') setStatus(m.text)
-  else if (m.type === 'probe') answerProbe(m, probeEnv, (r) => worker.postMessage(r))
+  else if (m.type === 'probe') {
+    answerProbe(m, probeEnv, (r) => worker.postMessage(r)).catch((e) => setStatus(`오류: 메모리 응답 실패 (${e?.message ?? e})`))
+  }
   else if (m.type === 'error') setStatus(`오류: ${m.message}`)
   else if (m.type === 'result') {
     result = m.result
@@ -54,7 +56,7 @@ const onWorkerMessage = async (m) => {
       ...result.env,
       uaMemoryApi: typeof measure === 'function',
       charging: await charging(),
-      device: $('device').value.trim() || null,
+      device: $('device').value.trim(),
     }
     show()
     setStatus(result.memory.residual.source === null
@@ -81,6 +83,11 @@ startButton.addEventListener('click', async () => {
   startButton.disabled = true
   try {
     const kind = $('kind').value
+    if ($('device').value.trim() === '') {
+      setStatus('기기 이름을 먼저 입력하세요.')
+      startButton.disabled = false
+      return
+    }
     setStatus('하네스 정보 읽는 중')
     const harness = await (await fetchOk('/meta.json')).json()
     const wasmSha256 = await sha256Hex(await (await fetchOk('/pkg/engine_wasm_bg.wasm')).arrayBuffer())
@@ -112,7 +119,7 @@ manualButton.addEventListener('click', () => {
 manualForm.addEventListener('submit', (e) => {
   e.preventDefault()
   const mb = Number(manualInput.value)
-  if (!Number.isFinite(mb) || mb <= 0) {
+  if (!Number.isFinite(mb) || Math.round(mb * 2 ** 20) < 1) {
     manualLabel.textContent = `${manualLabel.textContent.split(' / ')[0]} / 양수를 다시 입력하세요`
     return
   }
