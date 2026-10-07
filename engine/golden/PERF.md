@@ -86,3 +86,21 @@ cargo test --locked --release --manifest-path engine/Cargo.toml -p engine-core s
 | wasm 메모리(제출 후, 최댓값) | 108.8MiB | **124.8MiB** |
 
 최댓값이 늘어 채택 기준("wasm 메모리 최댓값이 늘지 않을 것")에 걸려 되돌렸다. 할당 크기가 바뀌면서 선형 메모리 단편화가 생긴 것으로 보인다(원인은 확인하지 않음).
+
+### 후보 C4 + C1 (채택, 2026-10-07)
+
+데스크톱 Chrome 게이트 1회차가 FAIL(제출 p95 795ms > 700, 로드 p95 1074ms > 1000)이어서 사용자 결정으로 추가한 후보. 1024 채점 이미지 699,392픽셀 중 서로 다른 (플레이어 RGB, 정답 RGB) 쌍은 골든 플레이어 4종에서 180,839~190,871개(약 27%)였다.
+
+- `delta_e_image`: 같은 바이트는 0.0, 나머지는 (a, b) 색쌍마다 ΔE00을 한 번만 계산(메모)
+- `lab_image`: 색마다 Lab을 한 번만 계산(C1)
+- 메모는 속도만 바꾼다: 값은 키의 순수 함수라 자리마다 기존 계산과 `to_bits` 동일(`delta_e_image_matches_naive_on_repeated_color_pairs`, `lab_image_cache_matches_uncached_bitwise`, 키에서 정답 색을 뺀 변이를 테스트가 잡는 것 확인)
+
+wasm(node) p50, 같은 기기:
+
+| 항목 | 전 | 후 |
+|------|---:|---:|
+| 로드: ScoringReference::new | 975ms | 598~619ms |
+| 로드 합계 | 1063ms | 693~719ms |
+| 제출: 채점 | 700ms | 389~410ms |
+| 제출 합계 | 799ms | 492~508ms |
+| wasm 메모리 최댓값 | 109.0MiB | 109.0MiB |
