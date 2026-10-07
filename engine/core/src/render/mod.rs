@@ -11,12 +11,20 @@
 //! Input and output are encoded-sRGB `ImageF32` of the SAME size, always (master plan A10):
 //! the recipe's `crop` is never applied here. Cropping is a separate display operation
 //! (`crop_rgba8`, Plan 1b) and the scoring path never uses it.
+//!
+//! [`render_rgba8`] precomputes stages 1-3 as a per-channel 256-entry LUT: exposure and white
+//! balance are per-channel gains, so on 8-bit input each channel's stage-3 value depends on
+//! that channel's byte alone, and evaluating the same functions in the same order 256 times
+//! gives bit-identical results (Plan 1b-1). This holds only while stages 1-3 stay per-channel
+//! functions of the input byte. Features that need per-pixel linear values get them from the
+//! source (`srgb_decode` of the f32 input in [`render`], `srgb_decode(dequantize(byte))` in
+//! [`render_rgba8`]); stages are never reordered to fit the LUT.
 
 pub mod basic;
 
-use crate::buffer::{ImageF32, Rgba8};
+use crate::buffer::{dequantize, BufferError, ImageF32, Rgba8};
 use crate::color::{srgb_decode, srgb_encode};
-use crate::recipe::{identity_curve, Normalized, Recipe};
+use crate::recipe::{identity_curve, Basic, Normalized, Recipe};
 use thiserror::Error;
 
 /// Per-render inputs that are not part of the recipe.
@@ -40,6 +48,9 @@ pub enum RenderError {
     /// A sample became NaN or infinite (should be unreachable for validated recipes).
     #[error("render produced a non-finite sample")]
     NonFinite,
+    /// Output buffer construction failed (unreachable for a valid `Rgba8` input).
+    #[error(transparent)]
+    Buffer(#[from] BufferError),
 }
 
 /// First feature in `r` that Plan 1a cannot render, if any. "Active" means it changes pixels;
@@ -105,19 +116,74 @@ pub fn render(
         });
     }
     let b = &r.basic;
-    let out = src.map_pixels(|px| {
-        let lin = px.map(srgb_decode);
-        let lin = basic::apply_exposure_linear(lin, b.exposure);
-        let lin = basic::apply_white_balance_linear(lin, b.temperature, b.tint);
-        let enc = lin.map(srgb_encode);
-        let enc = basic::apply_tone_encoded(enc, b);
-        basic::apply_color_encoded(enc, b.vibrance, b.saturation)
-    });
+    let out = src.map_pixels(|px| global_encoded(linear_stage(px.map(srgb_decode), b), b));
+    finite(out)
+}
+
+/// Stages 2-3 for one linear pixel: exposure, white balance, back to encoded.
+fn linear_stage(lin: [f32; 3], b: &Basic) -> [f32; 3] {
+    let lin = basic::apply_exposure_linear(lin, b.exposure);
+    let lin = basic::apply_white_balance_linear(lin, b.temperature, b.tint);
+    lin.map(srgb_encode)
+}
+
+/// Stage 4: the per-pixel global encoded-domain ops shared by both entry points.
+fn global_encoded(enc: [f32; 3], b: &Basic) -> [f32; 3] {
+    let enc = basic::apply_tone_encoded(enc, b);
+    basic::apply_color_encoded(enc, b.vibrance, b.saturation)
+}
+
+/// Stage 6.
+fn finite(out: ImageF32) -> Result<ImageF32, RenderError> {
     if out.samples().iter().all(|v| v.is_finite()) {
         Ok(out)
     } else {
         Err(RenderError::NonFinite)
     }
+}
+
+/// Stages 1-3 for every byte value, per channel. Calls exactly the functions [`render`] calls,
+/// in the same order, so each entry is bit-identical to the per-pixel result.
+fn linear_stage_lut(b: &Basic) -> [[f32; 256]; 3] {
+    let mut lut = [[0.0; 256]; 3];
+    for v in 0..=255u8 {
+        let d = srgb_decode(dequantize(v));
+        let enc = linear_stage([d, d, d], b);
+        for (c, table) in lut.iter_mut().enumerate() {
+            table[usize::from(v)] = enc[c];
+        }
+    }
+    lut
+}
+
+/// LUT fast path for 8-bit input: the same stages as [`render`], before quantization.
+pub(crate) fn render_rgba8_f32(
+    src: &Rgba8,
+    recipe: &Normalized,
+    _ctx: RenderContext, // seed is consumed by grain from Plan 1b
+) -> Result<ImageF32, RenderError> {
+    let r = recipe.recipe();
+    if let Some(feature) = unsupported_feature(r) {
+        return Err(RenderError::NotYetSupported {
+            feature,
+            plan: "Plan 1b",
+        });
+    }
+    let b = &r.basic;
+    let lut = linear_stage_lut(b);
+    let samples = src
+        .data()
+        .chunks_exact(4)
+        .flat_map(|p| {
+            let enc = [
+                lut[0][usize::from(p[0])],
+                lut[1][usize::from(p[1])],
+                lut[2][usize::from(p[2])],
+            ];
+            global_encoded(enc, b)
+        })
+        .collect();
+    finite(ImageF32::from_samples(src.width(), src.height(), samples)?)
 }
 
 /// RGBA8 in, RGBA8 out: the full-resolution render with its single final quantization
@@ -127,7 +193,7 @@ pub fn render_rgba8(
     recipe: &Normalized,
     ctx: &RenderContext,
 ) -> Result<Rgba8, RenderError> {
-    Ok(render(&ImageF32::from_rgba8(src), recipe, ctx)?.to_rgba8())
+    Ok(render_rgba8_f32(src, recipe, *ctx)?.to_rgba8())
 }
 
 #[cfg(test)]
@@ -332,5 +398,85 @@ mod tests {
             r.detail.sharpen_radius = 2.0;
         });
         assert!(render(&src, &r, &CTX).is_ok());
+    }
+
+    /// 256×4: column v; rows (v,0,0), (0,v,0), (0,0,v), (v,255-v,v/2).
+    fn all_levels() -> Rgba8 {
+        let mut d = Vec::with_capacity(256 * 4 * 4);
+        for row in 0..4u8 {
+            for v in 0..=255u8 {
+                let px = match row {
+                    0 => [v, 0, 0],
+                    1 => [0, v, 0],
+                    2 => [0, 0, v],
+                    _ => [v, 255 - v, v / 2],
+                };
+                d.extend_from_slice(&[px[0], px[1], px[2], 255]);
+            }
+        }
+        Rgba8::new(256, 4, d).unwrap()
+    }
+
+    fn assert_same_bits(a: &ImageF32, b: &ImageF32) {
+        assert_eq!((a.width(), a.height()), (b.width(), b.height()));
+        for (i, (x, y)) in a.samples().iter().zip(b.samples()).enumerate() {
+            assert_eq!(x.to_bits(), y.to_bits(), "sample {i}: {x} vs {y}");
+        }
+    }
+
+    /// 2048 recipes: for each 10-bit mask, slider i takes the low or high value of a pair;
+    /// first with the extremes, then with mid values. Slider order matches
+    /// `extreme_basic_values_stay_finite_on_every_8bit_level`.
+    fn basic_grid() -> Vec<Normalized> {
+        let mut out = Vec::with_capacity(2048);
+        for (ev, other) in [((-5.0, 5.0), (-100.0, 100.0)), ((-1.3, 0.7), (-37.0, 23.0))] {
+            for bits in 0..1024u32 {
+                let pick = |i: u32, (lo, hi): (f32, f32)| if bits >> i & 1 == 1 { hi } else { lo };
+                out.push(norm(|r| {
+                    let b = &mut r.basic;
+                    b.exposure = pick(0, ev);
+                    b.contrast = pick(1, other);
+                    b.highlights = pick(2, other);
+                    b.shadows = pick(3, other);
+                    b.whites = pick(4, other);
+                    b.blacks = pick(5, other);
+                    b.temperature = pick(6, other);
+                    b.tint = pick(7, other);
+                    b.vibrance = pick(8, other);
+                    b.saturation = pick(9, other);
+                }));
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn lut_render_matches_reference_on_grid() {
+        let src = all_levels();
+        for (k, r) in basic_grid().iter().enumerate() {
+            let reference = render(&ImageF32::from_rgba8(&src), r, &CTX).unwrap();
+            let fast = render_rgba8_f32(&src, r, CTX).unwrap();
+            assert_same_bits(&fast, &reference);
+            assert_eq!(fast.to_rgba8(), reference.to_rgba8(), "recipe {k}");
+        }
+    }
+
+    #[test]
+    fn lut_path_handles_degenerate_sizes() {
+        let r = norm(|r| {
+            r.basic.exposure = 0.5;
+            r.basic.temperature = 20.0;
+            r.basic.shadows = 40.0;
+        });
+        for (w, h) in [(1u32, 1u32), (3000, 1), (1, 3000), (7, 5)] {
+            let data = (0..w * h * 4)
+                .map(|i| ((i * 31 + (i / 4) * 17) % 256) as u8)
+                .collect();
+            let src = Rgba8::new(w, h, data).unwrap();
+            assert_same_bits(
+                &render_rgba8_f32(&src, &r, CTX).unwrap(),
+                &render(&ImageF32::from_rgba8(&src), &r, &CTX).unwrap(),
+            );
+        }
     }
 }
