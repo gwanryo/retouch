@@ -43,17 +43,18 @@ const check = (label, path, want) => {
 }
 
 const isProcessed = (meta) => !String(meta.processing ?? '').startsWith('none')
-const HEX = (n) => new RegExp(`^[0-9a-f]{${n}}$`)
+const isHex = (v, n) => typeof v === 'string' && new RegExp(`^[0-9a-f]{${n}}$`).test(v)
+const isDate = (v) => typeof v === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(v)
 
 /** Shape of a processed file's reproduce record (audit data; only the format is checked). */
 const checkReproduce = (file, rep) => {
   if (!rep) return fail(`NO REPRODUCE RECORD ${file}`)
   const problems = []
   if (!['ci', 'manual'].includes(rep.how)) problems.push(`how=${rep.how}`)
-  if (rep.last_ok !== null && !/^\d{4}-\d{2}-\d{2}$/.test(String(rep.last_ok))) problems.push(`last_ok=${rep.last_ok}`)
+  if (rep.last_ok !== null && !isDate(rep.last_ok)) problems.push(`last_ok=${JSON.stringify(rep.last_ok)}`)
   if (typeof rep.engine_version !== 'string' || rep.engine_version === '') problems.push('engine_version')
-  if (!HEX(40).test(String(rep.engine_tree))) problems.push('engine_tree')
-  if (!HEX(64).test(String(rep.cargo_lock_sha256))) problems.push('cargo_lock_sha256')
+  if (!isHex(rep.engine_tree, 40)) problems.push('engine_tree')
+  if (!isHex(rep.cargo_lock_sha256, 64)) problems.push('cargo_lock_sha256')
   if (typeof rep.rustc !== 'string' || rep.rustc === '') problems.push('rustc')
   if (problems.length > 0) return fail(`BAD REPRODUCE RECORD ${file}: ${problems.join(', ')}`)
   if (rep.last_ok === null) console.log(`UNVERIFIED reproduce ${file} (${rep.how}): never reproduced`)

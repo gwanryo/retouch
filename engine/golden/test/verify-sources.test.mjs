@@ -85,6 +85,19 @@ test('reports a never-reproduced processed file as unverified, not ok', () => {
   const r = run(fixture((s) => (s.files['images/a.jpg'].reproduce.last_ok = null)))
   assert.equal(r.code, 0, r.out)
   assert.match(r.out, /UNVERIFIED reproduce images\/a\.jpg/)
+  assert.doesNotMatch(r.out, /ok reproduce/)
+})
+
+test('rejects non-string dates and hashes in a reproduce record', () => {
+  for (const edit of [
+    (rep) => (rep.last_ok = ['2026-10-07']),
+    (rep) => (rep.engine_tree = ['b'.repeat(40)]),
+    (rep) => (rep.cargo_lock_sha256 = [HEX64]),
+  ]) {
+    const r = run(fixture((s) => edit(s.files['images/a.jpg'].reproduce)))
+    assert.equal(r.code, 1, r.out)
+    assert.match(r.out, /BAD REPRODUCE RECORD images\/a\.jpg/)
+  }
 })
 
 test('an original (unprocessed) file needs no reproduce record', () => {
