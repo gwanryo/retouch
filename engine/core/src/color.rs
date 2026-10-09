@@ -207,6 +207,22 @@ pub fn sharma_2005_rows() -> Vec<(Lab, Lab, f64)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::buffer::dequantize;
+
+    #[test]
+    #[ignore = "exhaustive over 2^24 colors; CI runs it in release (-- --ignored exhaustive_)"]
+    fn exhaustive_delta_e00_of_identical_lab_is_positive_zero() {
+        let lut: Vec<f32> = (0..=255u8).map(|v| srgb_decode(dequantize(v))).collect();
+        for rgb in 0u32..(1 << 24) {
+            let c = |shift: u32| lut[((rgb >> shift) & 255) as usize];
+            let lab = linear_srgb_to_lab_d50(c(16), c(8), c(0));
+            assert_eq!(
+                delta_e00(lab, lab).to_bits(),
+                0.0f64.to_bits(),
+                "rgb {rgb:06x}"
+            );
+        }
+    }
 
     fn lab8(r: u8, g: u8, b: u8) -> Lab {
         let d = |v: u8| srgb_decode(f32::from(v) / 255.0);

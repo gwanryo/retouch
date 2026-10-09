@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Retouch 성능 게이트 벤치</title>
+  <link rel="icon" href="data:,">
+  <style>
+    body { font: 15px/1.5 system-ui, sans-serif; margin: 16px; max-width: 960px; background: #fff; color: #18181b; }
+    fieldset { border: 1px solid #d4d4d8; border-radius: 8px; margin: 0 0 12px; padding: 12px; display: grid; gap: 8px; }
+    label { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+    input[type=text], input[type=number], select { font: inherit; padding: 4px 6px; }
+    button { font: inherit; padding: 6px 12px; }
+    #status { margin: 12px 0; font-weight: 600; overflow-wrap: anywhere; }
+    pre { background: #f4f4f5; padding: 12px; overflow: auto; max-height: 60vh; font-size: 12px; }
+  </style>
+</head>
+<body>
+  <h1>Retouch 성능 게이트 벤치</h1>
+  <fieldset>
+    <label>종류
+      <select id="kind">
+        <option value="desktop">desktop</option>
+        <option value="mobile">mobile</option>
+      </select>
+    </label>
+    <label>기기 (모델, OS, Chrome 버전)
+      <input id="device" type="text" size="40" placeholder="예: i7-10700K, Windows 10, Chrome 141">
+    </label>
+    <label>충전 중
+      <select id="charging">
+        <option value="auto">자동 감지</option>
+        <option value="true">예</option>
+        <option value="false">아니요</option>
+      </select>
+    </label>
+    <div>
+      <button id="start" type="button">측정 시작</button>
+      <button id="copy" type="button" disabled>JSON 복사</button>
+      <button id="manual" type="button" disabled>수동 잔존 패스</button>
+    </div>
+  </fieldset>
+  <form id="manual-form" hidden>
+    <label><span id="manual-label"></span>
+      <input id="manual-mb" type="number" step="any" min="0" inputmode="decimal">
+      <button type="submit">입력</button>
+    </label>
+  </form>
+  <p id="status" role="status" aria-live="polite">대기 중. 새 탭에서 한 번만 측정합니다.</p>
+  <pre id="output"></pre>
+  <script type="module" src="/web/page.mjs"></script>
+</body>
+</html>

@@ -10,6 +10,7 @@ npm-debug.log*
 # Rust
 engine/target/
 engine/wasm/pkg/
+engine/wasm/pkg-web/
 **/*.rs.bk
 engine/golden/actual-*.json
 engine/golden/expected.json.tmp

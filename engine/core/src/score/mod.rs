@@ -19,6 +19,8 @@ use crate::recipe::Crop;
 use crate::region::{RegionError, RegionMask, RegionSpec};
 use crate::resample::{scoring_image, ResampleError};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::hash::{BuildHasherDefault, Hasher};
 use thiserror::Error;
 
 /// Scoring failures.
@@ -135,15 +137,74 @@ pub struct Score {
     pub scoring_version: String,
 }
 
+/// Hasher for packed color keys. Memo lookups only decide speed, never values: every entry is
+/// the same pure function of its key, so results are bit-identical to computing per pixel.
+#[derive(Clone, Copy, Default)]
+struct ColorHasher(u64);
+
+impl Hasher for ColorHasher {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+
+    fn write(&mut self, bytes: &[u8]) {
+        for &b in bytes {
+            self.write_u64(self.0 ^ u64::from(b));
+        }
+    }
+
+    fn write_u64(&mut self, n: u64) {
+        // multiplicative mix; fold the high half down so both bucket bits and tag bits vary
+        let h = n.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        self.0 = h ^ (h >> 32);
+    }
+}
+
+type ColorMemo<V> = HashMap<u64, V, BuildHasherDefault<ColorHasher>>;
+
+/// RGB bytes of an RGBA8 pixel as a 24-bit key.
+fn rgb_key(p: &[u8]) -> u64 {
+    u64::from(p[0]) << 16 | u64::from(p[1]) << 8 | u64::from(p[2])
+}
+
+/// Lab of every pixel, computed once per distinct color (Plan 1b-1 C1/C4).
 fn lab_image(img: &Rgba8) -> Vec<Lab> {
     let lut: Vec<f32> = (0..=255u8).map(|v| srgb_decode(dequantize(v))).collect();
+    let mut memo = ColorMemo::<Lab>::default();
     img.data()
         .chunks_exact(4)
         .map(|p| {
-            let c = |i: usize| lut[usize::from(p[i])];
-            linear_srgb_to_lab_d50(c(0), c(1), c(2))
+            *memo.entry(rgb_key(p)).or_insert_with(|| {
+                let c = |i: usize| lut[usize::from(p[i])];
+                linear_srgb_to_lab_d50(c(0), c(1), c(2))
+            })
         })
         .collect()
+}
+
+/// Per-pixel ΔE00 between two scoring images in pixel order. A pixel whose RGB bytes are equal
+/// has equal Lab, and ΔE00 of equal Lab is exactly `+0.0` (exhaustively tested in `color`), so
+/// it is skipped. Otherwise ΔE00 is computed once per distinct (a, b) color pair: Lab is a pure
+/// function of the color, so the value at every position is bit-identical to `delta_e00`.
+fn delta_e_image<'a>(
+    a: &'a Rgba8,
+    lab_a: &'a [Lab],
+    b: &'a Rgba8,
+    lab_b: &'a [Lab],
+) -> impl Iterator<Item = f64> + 'a {
+    a.data()
+        .chunks_exact(4)
+        .zip(b.data().chunks_exact(4))
+        .zip(lab_a.iter().zip(lab_b))
+        .scan(ColorMemo::<f64>::default(), |memo, ((pa, pb), (la, lb))| {
+            Some(if pa[..3] == pb[..3] {
+                0.0
+            } else {
+                *memo
+                    .entry(rgb_key(pa) << 24 | rgb_key(pb))
+                    .or_insert_with(|| delta_e00(*la, *lb))
+            })
+        })
 }
 
 fn mean_over(values: impl Iterator<Item = f64>, mask: &RegionMask) -> f64 {
@@ -204,7 +265,10 @@ impl ScoringReference {
         let lab_answer = lab_image(&answer_scoring);
         let lab_o = lab_image(&original_scoring);
         let pairs = || lab_o.iter().zip(&lab_answer);
-        let d_e_original = mean_over(pairs().map(|(o, a)| delta_e00(*o, *a)), &mask);
+        let d_e_original = mean_over(
+            delta_e_image(&original_scoring, &lab_o, &answer_scoring, &lab_answer),
+            &mask,
+        );
         let dl_original = mean_over(pairs().map(|(o, a)| (o.l - a.l).abs()), &mask);
         let dc_original = mean_over(
             pairs().map(|(o, a)| libm::hypot(o.a - a.a, o.b - a.b)),
@@ -246,11 +310,13 @@ impl ScoringReference {
         check_size(player, self.width, self.height)?;
         let player_scoring = scoring_image(player, crate::SCORING_LONG_EDGE)?;
         let lab_p = lab_image(&player_scoring);
-        let de: Vec<f64> = lab_p
-            .iter()
-            .zip(&self.lab_answer)
-            .map(|(p, a)| delta_e00(*p, *a))
-            .collect();
+        let de: Vec<f64> = delta_e_image(
+            &player_scoring,
+            &lab_p,
+            &self.answer_scoring,
+            &self.lab_answer,
+        )
+        .collect();
         let stats = error_stats(&de, &self.mask)?;
         let v = verdict(&stats, self.d_e_original);
         let pairs = || lab_p.iter().zip(&self.lab_answer);
@@ -555,5 +621,213 @@ mod tests {
             .collect();
         assert!(positions.windows(2).all(|p| p[0] < p[1]), "{json}");
         assert!(json.contains(r#""top_error_regions":[]"#) && json.contains(r#""detail":null"#));
+    }
+
+    /// Left half from `left`, right half from `right` (same size).
+    fn half_and_half(left: &Rgba8, right: &Rgba8) -> Rgba8 {
+        let w = left.width() as usize;
+        let data = left
+            .data()
+            .chunks_exact(4)
+            .zip(right.data().chunks_exact(4))
+            .enumerate()
+            .flat_map(|(i, (l, r))| {
+                if i % w < w / 2 {
+                    l.to_vec()
+                } else {
+                    r.to_vec()
+                }
+            })
+            .collect();
+        Rgba8::new(left.width(), left.height(), data).unwrap()
+    }
+
+    #[test]
+    fn delta_e_image_matches_naive_bitwise() {
+        let a = gradient(64, 48);
+        let shifted = with_exposure(&a, 0.8);
+        for (b, equal_pixels) in [
+            (a.clone(), 3072),
+            (shifted.clone(), 0),
+            (half_and_half(&a, &shifted), 1536),
+        ] {
+            let (sa, sb) = (
+                scoring_image(&a, 1024).unwrap(),
+                scoring_image(&b, 1024).unwrap(),
+            );
+            let (la, lb) = (lab_image(&sa), lab_image(&sb));
+            let same = sa
+                .data()
+                .chunks_exact(4)
+                .zip(sb.data().chunks_exact(4))
+                .filter(|(p, q)| p[..3] == q[..3])
+                .count();
+            assert_eq!(same, equal_pixels);
+            let fast: Vec<u64> = delta_e_image(&sa, &la, &sb, &lb)
+                .map(f64::to_bits)
+                .collect();
+            let naive: Vec<u64> = la
+                .iter()
+                .zip(&lb)
+                .map(|(x, y)| delta_e00(*x, *y).to_bits())
+                .collect();
+            assert_eq!(fast, naive);
+        }
+    }
+
+    /// `w`×`h` image whose pixel `i` is `palette[pick(i) % palette.len()]`.
+    fn palette_image(w: u32, h: u32, palette: &[[u8; 3]], pick: impl Fn(usize) -> usize) -> Rgba8 {
+        let data = (0..(w * h) as usize)
+            .flat_map(|i| {
+                let c = palette[pick(i) % palette.len()];
+                [c[0], c[1], c[2], 255]
+            })
+            .collect();
+        Rgba8::new(w, h, data).unwrap()
+    }
+
+    const PALETTE: [[u8; 3]; 16] = [
+        [0, 0, 0],
+        [255, 255, 255],
+        [12, 200, 40],
+        [200, 12, 40],
+        [40, 12, 200],
+        [128, 128, 128],
+        [90, 60, 30],
+        [30, 60, 90],
+        [250, 240, 10],
+        [10, 240, 250],
+        [1, 2, 3],
+        [254, 253, 252],
+        [77, 77, 78],
+        [77, 78, 77],
+        [180, 90, 140],
+        [60, 160, 110],
+    ];
+
+    /// Same player color against different answer colors (and the reverse) hits the memo with
+    /// a key that must include both colors.
+    #[test]
+    fn delta_e_image_matches_naive_on_repeated_color_pairs() {
+        let a = palette_image(97, 61, &PALETTE, |i| i);
+        let b = palette_image(97, 61, &PALETTE, |i| i / 3 + i % 5);
+        let (la, lb) = (lab_image(&a), lab_image(&b));
+        let fast: Vec<u64> = delta_e_image(&a, &la, &b, &lb).map(f64::to_bits).collect();
+        let naive: Vec<u64> = la
+            .iter()
+            .zip(&lb)
+            .map(|(x, y)| delta_e00(*x, *y).to_bits())
+            .collect();
+        assert_eq!(fast, naive);
+    }
+
+    fn assert_lab_matches_uncached(img: &Rgba8) {
+        let naive: Vec<[u64; 3]> = img
+            .data()
+            .chunks_exact(4)
+            .map(|p| {
+                let d = |v: u8| srgb_decode(dequantize(v));
+                let l = linear_srgb_to_lab_d50(d(p[0]), d(p[1]), d(p[2]));
+                [l.l.to_bits(), l.a.to_bits(), l.b.to_bits()]
+            })
+            .collect();
+        let got: Vec<[u64; 3]> = lab_image(img)
+            .iter()
+            .map(|l| [l.l.to_bits(), l.a.to_bits(), l.b.to_bits()])
+            .collect();
+        assert_eq!(got, naive);
+    }
+
+    #[test]
+    fn lab_image_cache_matches_uncached_bitwise() {
+        // one color; a repeated 16-color palette; 4096 distinct colors; seeded LCG noise
+        assert_lab_matches_uncached(&palette_image(64, 48, &PALETTE[2..3], |i| i));
+        assert_lab_matches_uncached(&palette_image(64, 48, &PALETTE, |i| i * 7));
+        let distinct = (0..4096u32)
+            .flat_map(|i| [(i & 255) as u8, (i >> 4) as u8, 255 - (i >> 8) as u8, 255])
+            .collect();
+        assert_lab_matches_uncached(&Rgba8::new(4096, 1, distinct).unwrap());
+        let mut seed = 12_345u32;
+        let noise = (0..64 * 48 * 4)
+            .map(|_| {
+                seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                (seed >> 24) as u8
+            })
+            .collect();
+        assert_lab_matches_uncached(&Rgba8::new(64, 48, noise).unwrap());
+    }
+
+    /// Stage timings on the 2048×1365 golden photo (Plan 1b-1 Task 2 Step 0). Median of 5.
+    #[test]
+    #[ignore = "profiling; run with --release -- --ignored --nocapture"]
+    fn profile_scoring_stages() {
+        use std::collections::HashSet;
+        use std::time::Instant;
+
+        let root = concat!(env!("CARGO_MANIFEST_DIR"), "/../golden");
+        let read = |p: &str| std::fs::read(format!("{root}/{p}")).unwrap();
+        let recipe = |p: &str| Recipe::from_json(&String::from_utf8(read(p)).unwrap()).unwrap();
+        let median = |label: &str, f: &mut dyn FnMut()| {
+            let mut ms: Vec<f64> = (0..5)
+                .map(|_| {
+                    let t = Instant::now();
+                    f();
+                    t.elapsed().as_secs_f64() * 1e3
+                })
+                .collect();
+            ms.sort_by(f64::total_cmp);
+            println!("{label:<24} {:>8.1} ms", ms[2]);
+        };
+        let ctx = RenderContext::default();
+        let src =
+            crate::decode::decode_rgba8(&read("images/lake_2048x1365_baseline420.jpg")).unwrap();
+        let answer = render_rgba8(&src, &recipe("recipes/warm_contrast.json"), &ctx).unwrap();
+        let player_recipe = recipe("recipes/player_warm_near.json");
+
+        let mut player = None;
+        median("render 2048", &mut || {
+            player = Some(render_rgba8(&src, &player_recipe, &ctx).unwrap());
+        });
+        let player = player.unwrap();
+        let mut ps = None;
+        median("scoring_image", &mut || {
+            ps = Some(scoring_image(&player, 1024).unwrap());
+        });
+        let ps = ps.unwrap();
+        let sa = scoring_image(&answer, 1024).unwrap();
+        let mut lp = Vec::new();
+        median("lab_image", &mut || lp = lab_image(&ps));
+        let la = lab_image(&sa);
+        let mut de = Vec::new();
+        median("delta_e00 every pixel", &mut || {
+            de = lp.iter().zip(&la).map(|(p, a)| delta_e00(*p, *a)).collect();
+        });
+        median("delta_e_image", &mut || {
+            de = delta_e_image(&ps, &lp, &sa, &la).collect();
+        });
+        let mask = FULL.rasterize(ps.width(), ps.height()).unwrap();
+        median("error_stats", &mut || {
+            error_stats(&de, &mask).unwrap();
+        });
+        median("ScoringReference::new", &mut || {
+            ScoringReference::new(&src, &answer, &FULL).unwrap();
+        });
+        let colors: HashSet<[u8; 3]> = ps
+            .data()
+            .chunks_exact(4)
+            .map(|p| [p[0], p[1], p[2]])
+            .collect();
+        let same = ps
+            .data()
+            .chunks_exact(4)
+            .zip(sa.data().chunks_exact(4))
+            .filter(|(p, q)| p[..3] == q[..3])
+            .count();
+        let n = ps.data().len() / 4;
+        println!("distinct player colors    {} of {n}", colors.len());
+        println!(
+            "pixels equal to answer    {same} ({:.1}%)",
+            100.0 * same as f64 / n as f64
+        );
     }
 }

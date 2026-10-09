@@ -78,6 +78,8 @@ jobs:
         run: cargo clippy --locked --manifest-path engine/Cargo.toml --workspace --all-targets -- -D warnings
       - name: Test (native, debug)
         run: cargo test --locked --manifest-path engine/Cargo.toml --workspace
+      - name: Exhaustive properties (release)
+        run: cargo test --locked --release --manifest-path engine/Cargo.toml -p engine-core -- --ignored exhaustive_
       - name: Clippy (wasm32)
         run: cargo clippy --locked --manifest-path engine/Cargo.toml -p engine-wasm --all-targets --target wasm32-unknown-unknown -- -D warnings
       - uses: actions/setup-node@v4
@@ -94,13 +96,21 @@ jobs:
         run: wasm-pack test --node engine/wasm --locked
       - name: Build wasm (nodejs, release)
         run: wasm-pack build engine/wasm --target nodejs --release -- --locked
+      - name: Bench tests (scenario on real wasm, judge, protocol, server)
+        shell: bash
+        run: |
+          set -euo pipefail
+          TMP=$(mktemp -d)
+          cargo run --locked --release --manifest-path engine/Cargo.toml -p engine-cli -- fixture --out-dir "$TMP" --width 64 --height 48
+          cargo run --locked --release --manifest-path engine/Cargo.toml -p engine-cli -- gen-answer --input "$TMP/fixture.jpg" --recipe engine/golden/recipes/identity.json --seed 0 --out-dir "$TMP" --allow-any-size
+          BENCH_FIXTURE_DIR="$TMP" node --test "engine/wasm/bench/test/*.test.mjs"
       - name: Test (wasm == native)
         run: node --test "engine/wasm/test/*.test.mjs"
       - name: Golden test files present
         shell: bash
         run: |
           # The wasm glob step must not silently lose a test file (e.g. one left out of a commit).
-          for f in engine/wasm/test/smoke.test.mjs engine/wasm/test/golden.test.mjs engine/wasm/test/cli_contract.test.mjs engine/golden/test/verify-sources.test.mjs; do
+          for f in engine/wasm/test/smoke.test.mjs engine/wasm/test/golden.test.mjs engine/wasm/test/cli_contract.test.mjs engine/golden/test/verify-sources.test.mjs engine/wasm/bench/test/scenario.test.mjs engine/wasm/bench/test/judge.test.mjs engine/wasm/bench/test/protocol.test.mjs engine/wasm/bench/test/serve.test.mjs; do
             test -f "$f" || { echo "missing $f"; exit 1; }
           done
       - name: Golden sources script tests

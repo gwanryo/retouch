@@ -1,0 +1,4 @@
+{
+  "mobile": { "submit_p95_ms": 2000, "load_p95_ms": 3000, "peak_mib": 300, "growth_ratio": 0.10 },
+  "desktop": { "submit_p95_ms": 700, "load_p95_ms": 1000, "peak_mib": null, "growth_ratio": 0.10 }
+}
