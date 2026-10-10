@@ -22,6 +22,7 @@
 
 pub mod basic;
 mod curve;
+mod hsl;
 
 use crate::buffer::{dequantize, BufferError, ImageF32, Rgba8};
 use crate::color::{srgb_decode, srgb_encode};
@@ -61,19 +62,10 @@ pub fn unsupported_feature(r: &Recipe) -> Option<&'static str> {
     let b = &r.basic;
     let zone_active = |z: &crate::recipe::GradeZone| z.sat != 0.0 || z.lum != 0.0;
     let g = &r.color_grade;
-    let checks: [(&'static str, bool); 10] = [
+    let checks: [(&'static str, bool); 9] = [
         ("basic.texture", b.texture != 0.0),
         ("basic.clarity", b.clarity != 0.0),
         ("basic.dehaze", b.dehaze != 0.0),
-        (
-            "hsl",
-            r.hsl
-                .hue
-                .iter()
-                .chain(&r.hsl.saturation)
-                .chain(&r.hsl.luminance)
-                .any(|&v| v != 0.0),
-        ),
         (
             "color_grade",
             [&g.shadows, &g.midtones, &g.highlights, &g.global]
@@ -132,6 +124,7 @@ fn linear_stage(lin: [f32; 3], b: &Basic) -> [f32; 3] {
 struct GlobalOps<'a> {
     basic: &'a Basic,
     curves: Option<curve::CurveSet>,
+    hsl: Option<hsl::HslPlan>,
 }
 
 impl<'a> GlobalOps<'a> {
@@ -139,18 +132,22 @@ impl<'a> GlobalOps<'a> {
         Self {
             basic: &r.basic,
             curves: curve::CurveSet::new(&r.tone_curve),
+            hsl: hsl::HslPlan::new(&r.hsl),
         }
     }
 }
 
 /// Stages 4-5 for one encoded pixel, shared by both entry points: basic tone and color (4),
-/// then tone curve (5a).
+/// then tone curve (5a) and HSL (5b).
 fn global_encoded(enc: [f32; 3], ops: &GlobalOps) -> [f32; 3] {
     let b = ops.basic;
     let enc = basic::apply_tone_encoded(enc, b);
     let mut px = basic::apply_color_encoded(enc, b.vibrance, b.saturation);
     if let Some(c) = &ops.curves {
         px = c.apply(px);
+    }
+    if let Some(h) = &ops.hsl {
+        px = h.apply(px);
     }
     px
 }
@@ -404,9 +401,17 @@ mod tests {
     }
 
     #[test]
+    fn hsl_saturation_minus_100_grays_vivid_pixels() {
+        let src = ImageF32::new_filled(2, 1, [0.8, 0.2, 0.15]).unwrap();
+        let out = render(&src, &norm(|r| r.hsl.saturation = [-100.0; 8]), &CTX).unwrap();
+        let px = out.pixel(0, 0);
+        let chroma = px[0].max(px[1]).max(px[2]) - px[0].min(px[1]).min(px[2]);
+        assert!(chroma <= 1e-5, "{px:?}");
+    }
+
+    #[test]
     fn rejects_each_plan_1b_feature_instead_of_ignoring_it() {
         assert_eq!(rejected(|r| r.basic.clarity = 10.0), "basic.clarity");
-        assert_eq!(rejected(|r| r.hsl.saturation[2] = -20.0), "hsl");
         assert_eq!(
             rejected(|r| r.color_grade.midtones.sat = 10.0),
             "color_grade"
