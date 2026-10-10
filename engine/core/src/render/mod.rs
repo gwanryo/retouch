@@ -28,8 +28,9 @@ pub mod basic;
 mod curve;
 mod grade;
 mod hsl;
+mod memo;
 
-use crate::buffer::{dequantize, BufferError, ImageF32, Rgba8};
+use crate::buffer::{dequantize, quantize, BufferError, ImageF32, Rgba8};
 use crate::color::{srgb_decode, srgb_encode};
 use crate::recipe::{Basic, Normalized, Recipe};
 use thiserror::Error;
@@ -132,6 +133,20 @@ impl<'a> GlobalOps<'a> {
             split: grade::SplitPlan::new(&r.split_toning),
         }
     }
+
+    /// No stage-5 feature is active, so stage 4 alone is the whole of stages 4-5.
+    fn stage5_inactive(&self) -> bool {
+        self.curves.is_none() && self.hsl.is_none() && self.grade.is_none() && self.split.is_none()
+    }
+}
+
+/// Stage 4 alone: the same calls, in the same order, as the stage-4 lines of [`global_encoded`],
+/// so it is bit-identical to it whenever [`GlobalOps::stage5_inactive`] holds. A separate body
+/// (not called from `global_encoded`) gives the stage-5-free recipes their own monomorphic loop;
+/// sharing one generic loop with the stage-5 checks cost +10% render time (Task 6 profile F).
+fn basic_encoded(enc: [f32; 3], b: &Basic) -> [f32; 3] {
+    let enc = basic::apply_tone_encoded(enc, b);
+    basic::apply_color_encoded(enc, b.vibrance, b.saturation)
 }
 
 /// Stages 4-5 for one encoded pixel, shared by both entry points: basic tone and color (4),
@@ -178,7 +193,9 @@ fn linear_stage_lut(b: &Basic) -> [[f32; 256]; 3] {
     lut
 }
 
-/// LUT fast path for 8-bit input: the same stages as [`render`], before quantization.
+/// LUT path for 8-bit input: the same stages as [`render`], before quantization. Test oracle
+/// only since Task 6a: [`render_rgba8`] runs the same per-pixel math through [`shade`].
+#[cfg(test)]
 pub(crate) fn render_rgba8_f32(
     src: &Rgba8,
     recipe: &Normalized,
@@ -206,12 +223,145 @@ pub(crate) fn render_rgba8_f32(
 
 /// RGBA8 in, RGBA8 out: the full-resolution render with its single final quantization
 /// (master plan A3 point ①). This is what the answer PNG stores.
+///
+/// Bit-identical to `render(&ImageF32::from_rgba8(src), ..)?.to_rgba8()`, but faster: stages 1-3
+/// come from the LUT, recipes without stage-5 features run a stage-4-only loop, and pixels are
+/// memoized by their input bytes (see [`memo`] for why that is exact and when it stops being
+/// valid). Output alpha is 255, as `ImageF32::to_rgba8` writes it.
 pub fn render_rgba8(
     src: &Rgba8,
     recipe: &Normalized,
-    ctx: &RenderContext,
+    _ctx: &RenderContext, // seed is consumed by grain from Plan 1b
 ) -> Result<Rgba8, RenderError> {
-    Ok(render_rgba8_f32(src, recipe, *ctx)?.to_rgba8())
+    render_rgba8_with(src, recipe, Strategy::Memo).map(|(img, _)| img)
+}
+
+/// How [`shade`] visits pixels. Both give the same bytes and the same error.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Strategy {
+    /// Byte memo for the first [`memo::PROBE_PIXELS`], then kept or dropped by
+    /// [`memo::falls_back`].
+    Memo,
+    /// Every pixel computed. Production reaches the same loop only through the memo's fallback;
+    /// tests use this variant as the uncached reference.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "uncached reference strategy for tests")
+    )]
+    Direct,
+}
+
+/// What the memo did, for tests.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct MemoStats {
+    /// Cache hits among the first [`memo::PROBE_PIXELS`] pixels.
+    probe_hits: usize,
+    /// The rest of the image ran the direct loop.
+    fell_back: bool,
+}
+
+fn render_rgba8_with(
+    src: &Rgba8,
+    recipe: &Normalized,
+    strategy: Strategy,
+) -> Result<(Rgba8, MemoStats), RenderError> {
+    let r = recipe.recipe();
+    reject_unsupported(r)?;
+    let lut = linear_stage_lut(&r.basic);
+    let ops = GlobalOps::new(r);
+    let (data, stats) = if ops.stage5_inactive() {
+        let b = ops.basic;
+        shade(src.data(), &lut, |enc| basic_encoded(enc, b), strategy)?
+    } else {
+        shade(src.data(), &lut, |enc| global_encoded(enc, &ops), strategy)?
+    };
+    Ok((Rgba8::new(src.width(), src.height(), data)?, stats))
+}
+
+/// Stages 4-5 by `kernel` on LUT-encoded RGBA8 pixels `px`, then stage 7 and quantization.
+/// Returns RGBA8 bytes with alpha 255.
+fn shade<K: Fn([f32; 3]) -> [f32; 3]>(
+    px: &[u8],
+    lut: &[[f32; 256]; 3],
+    kernel: K,
+    strategy: Strategy,
+) -> Result<(Vec<u8>, MemoStats), RenderError> {
+    let mut out = Vec::with_capacity(px.len());
+    let mut stats = MemoStats::default();
+    match strategy {
+        Strategy::Direct => shade_direct(px, lut, &kernel, &mut out)?,
+        Strategy::Memo => {
+            let total = px.len() / 4;
+            let (probe, rest) = px.split_at(total.min(memo::PROBE_PIXELS) * 4);
+            let mut cache = memo::ByteMemo::new();
+            stats.probe_hits = shade_memo(probe, lut, &kernel, &mut cache, &mut out)?;
+            stats.fell_back = memo::falls_back(total, stats.probe_hits);
+            if stats.fell_back {
+                drop(cache);
+                shade_direct(rest, lut, &kernel, &mut out)?;
+            } else {
+                shade_memo(rest, lut, &kernel, &mut cache, &mut out)?;
+            }
+        }
+    }
+    Ok((out, stats))
+}
+
+/// Stages 1-3 of one RGBA8 pixel from the LUT (alpha ignored).
+fn lut_pixel(p: &[u8], lut: &[[f32; 256]; 3]) -> [f32; 3] {
+    [
+        lut[0][usize::from(p[0])],
+        lut[1][usize::from(p[1])],
+        lut[2][usize::from(p[2])],
+    ]
+}
+
+/// Stage 7 for one pixel, then the render's single final quantization (A3 point ①). The same
+/// check and the same error as [`finite`] on the whole image.
+fn finish(px: [f32; 3]) -> Result<[u8; 3], RenderError> {
+    if px.iter().all(|v| v.is_finite()) {
+        Ok(px.map(quantize))
+    } else {
+        Err(RenderError::NonFinite)
+    }
+}
+
+fn shade_direct<K: Fn([f32; 3]) -> [f32; 3]>(
+    px: &[u8],
+    lut: &[[f32; 256]; 3],
+    kernel: &K,
+    out: &mut Vec<u8>,
+) -> Result<(), RenderError> {
+    for p in px.chunks_exact(4) {
+        let [r, g, b] = finish(kernel(lut_pixel(p, lut)))?;
+        out.extend_from_slice(&[r, g, b, 255]);
+    }
+    Ok(())
+}
+
+/// Memoized loop; returns the hit count. Only misses run `kernel` and [`finish`]: a hit's key was
+/// stored from a finite miss with the same bytes, so a non-finite pixel always surfaces on a miss.
+fn shade_memo<K: Fn([f32; 3]) -> [f32; 3]>(
+    px: &[u8],
+    lut: &[[f32; 256]; 3],
+    kernel: &K,
+    cache: &mut memo::ByteMemo,
+    out: &mut Vec<u8>,
+) -> Result<usize, RenderError> {
+    let mut hits = 0;
+    for p in px.chunks_exact(4) {
+        let key = memo::key(p[0], p[1], p[2]);
+        let [r, g, b] = if let Some(rgb) = cache.get(key) {
+            hits += 1;
+            rgb
+        } else {
+            let rgb = finish(kernel(lut_pixel(p, lut)))?;
+            cache.insert(key, rgb);
+            rgb
+        };
+        out.extend_from_slice(&[r, g, b, 255]);
+    }
+    Ok(hits)
 }
 
 #[cfg(test)]
@@ -734,5 +884,179 @@ mod tests {
                 &render(&ImageF32::from_rgba8(&src), &r, &CTX).unwrap(),
             );
         }
+    }
+
+    // ---- Task 6a: byte memo and stage-5-free loop (M1-M7) ----
+
+    fn global_max() -> Normalized {
+        Recipe::from_json(include_str!(
+            "../../../golden/recipes/player_global_max.json"
+        ))
+        .unwrap()
+    }
+
+    /// Memo path, direct path and the f32 reference all give the same bytes.
+    fn assert_memo_matches(src: &Rgba8, r: &Normalized) -> MemoStats {
+        let (memo, stats) = render_rgba8_with(src, r, Strategy::Memo).unwrap();
+        let (direct, _) = render_rgba8_with(src, r, Strategy::Direct).unwrap();
+        let reference = render(&ImageF32::from_rgba8(src), r, &CTX)
+            .unwrap()
+            .to_rgba8();
+        assert_eq!(direct, reference, "direct path");
+        assert_eq!(memo, reference, "memo path");
+        assert_eq!(
+            render_rgba8(src, r, &CTX).unwrap(),
+            reference,
+            "entry point"
+        );
+        stats
+    }
+
+    /// Fixed-seed LCG bytes (Numerical Recipes constants), top byte of each step.
+    fn lcg_bytes(n: usize, seed: u32) -> Vec<u8> {
+        let mut s = seed;
+        (0..n)
+            .map(|_| {
+                s = s.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                (s >> 24) as u8
+            })
+            .collect()
+    }
+
+    /// RGBA8 image whose RGB bytes are uniform LCG noise and alpha varies.
+    fn noise(w: u32, h: u32, seed: u32) -> Rgba8 {
+        let mut d = lcg_bytes((w * h * 4) as usize, seed);
+        for (i, a) in d.iter_mut().skip(3).step_by(4).enumerate() {
+            *a = (i % 256) as u8;
+        }
+        Rgba8::new(w, h, d).unwrap()
+    }
+
+    /// M1: all 8-bit levels, basic-only recipes, the 64-subset color grid and the max recipe.
+    #[test]
+    fn memo_render_matches_reference_on_all_levels() {
+        let src = all_levels();
+        let basic = basic_grid();
+        let picks = [0usize, 341, 682, 1023, 1024, 1500, 2047];
+        for r in picks.iter().map(|&i| &basic[i]).chain(&color_grid()) {
+            assert_memo_matches(&src, r);
+        }
+        assert_memo_matches(&src, &global_max());
+    }
+
+    /// M2: 512x512 uniform noise misses almost always, so the memo falls back after the probe.
+    #[test]
+    fn memo_falls_back_on_noise_and_stays_bit_identical() {
+        let stats = assert_memo_matches(&noise(512, 512, 0x5EED), &global_max());
+        assert!(stats.fell_back, "{stats:?}");
+    }
+
+    /// M2 (other branch): a large image with few colors keeps the memo past the probe.
+    #[test]
+    fn memo_keeps_cache_on_few_colors_and_stays_bit_identical() {
+        let (w, h) = (512u32, 512u32);
+        let palette = lcg_bytes(64 * 3, 7);
+        let mut d = Vec::with_capacity((w * h * 4) as usize);
+        for i in 0..(w * h) as usize {
+            let c = (i * 37 / 5) % 64;
+            d.extend_from_slice(&palette[c * 3..c * 3 + 3]);
+            d.push(0);
+        }
+        let stats = assert_memo_matches(&Rgba8::new(w, h, d).unwrap(), &global_max());
+        assert!(!stats.fell_back, "{stats:?}");
+    }
+
+    /// M3: distinct keys that share one slot, interleaved so every visit evicts the previous one.
+    #[test]
+    fn memo_render_is_exact_under_hash_collisions() {
+        let target = memo::slot_of(memo::key(200, 40, 90));
+        let colliding: Vec<[u8; 3]> = (0..1u32 << 24)
+            .map(|v| [v as u8, (v >> 8) as u8, (v >> 16) as u8])
+            .filter(|p| memo::slot_of(memo::key(p[0], p[1], p[2])) == target)
+            .take(6)
+            .collect();
+        assert_eq!(colliding.len(), 6);
+        let mut d = Vec::new();
+        for i in 0..600usize {
+            let p = colliding[(i * 7 + i / 6) % 6];
+            d.extend_from_slice(&[p[0], p[1], p[2], 255]);
+        }
+        let src = Rgba8::new(600, 1, d).unwrap();
+        assert_memo_matches(&src, &global_max());
+        assert_memo_matches(&src, &norm(|r| r.basic.exposure = 0.3));
+    }
+
+    /// M4: images at or below the probe size finish on the memo without a decision.
+    #[test]
+    fn memo_render_matches_reference_on_small_images() {
+        let r = global_max();
+        for (k, (w, h)) in [(1u32, 1u32), (3, 1), (1, 3), (255, 257), (256, 256)]
+            .into_iter()
+            .enumerate()
+        {
+            let stats = assert_memo_matches(&noise(w, h, k as u32), &r);
+            assert!(!stats.fell_back, "{w}x{h}");
+        }
+    }
+
+    /// M5: a test kernel that turns one input level non-finite (validated recipes cannot, see
+    /// `extreme_global_color_values_stay_finite`). Both strategies return the same error, whether
+    /// the bad pixel comes first, after repeats, or after the fallback decision.
+    #[test]
+    fn memo_and_direct_report_the_same_non_finite_error() {
+        let lut = linear_stage_lut(&Recipe::default().basic);
+        let bad = lut[0][77];
+        let kernel = |px: [f32; 3]| {
+            if px[0].to_bits() == bad.to_bits() {
+                [px[0], f32::NAN, px[2]]
+            } else {
+                px
+            }
+        };
+        let mut late = noise(300, 300, 3).into_data();
+        let n = late.len();
+        late[n - 8] = 77;
+        let mut repeated = [10u8, 20, 30, 255].repeat(100);
+        repeated.extend_from_slice(&[77, 0, 0, 255, 77, 0, 0, 255]);
+        for px in [late, repeated, vec![77, 1, 2, 3]] {
+            let memo = shade(&px, &lut, kernel, Strategy::Memo).map(|(d, _)| d);
+            let direct = shade(&px, &lut, kernel, Strategy::Direct).map(|(d, _)| d);
+            assert_eq!(memo, Err(RenderError::NonFinite));
+            assert_eq!(direct, Err(RenderError::NonFinite));
+        }
+    }
+
+    /// M7: the stage-4-only kernel equals `global_encoded` bit for bit when stage 5 is inactive.
+    #[test]
+    fn basic_only_kernel_matches_global_encoded() {
+        let src = all_levels();
+        for r in &basic_grid() {
+            let rec = r.recipe();
+            let ops = GlobalOps::new(rec);
+            assert!(ops.stage5_inactive());
+            let lut = linear_stage_lut(&rec.basic);
+            for p in src.data().chunks_exact(4) {
+                let enc = [
+                    lut[0][usize::from(p[0])],
+                    lut[1][usize::from(p[1])],
+                    lut[2][usize::from(p[2])],
+                ];
+                assert_eq!(
+                    basic_encoded(enc, &rec.basic).map(f32::to_bits),
+                    global_encoded(enc, &ops).map(f32::to_bits)
+                );
+            }
+        }
+    }
+
+    /// M7 (dispatch): any single stage-5 feature leaves the stage-4-only loop.
+    #[test]
+    fn any_stage5_feature_disables_the_basic_only_loop() {
+        let features = color_features();
+        for f in &features[..5] {
+            let r = norm(f);
+            assert!(!GlobalOps::new(r.recipe()).stage5_inactive());
+        }
+        assert!(GlobalOps::new(norm(|r| features[5](r)).recipe()).stage5_inactive());
     }
 }
