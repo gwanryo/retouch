@@ -4,9 +4,13 @@
 //! 2. linear stage: exposure, white balance
 //! 3. linear → encoded (`srgb_encode`, unclamped)
 //! 4. encoded stage: contrast/highlights/shadows/whites/blacks, then vibrance/saturation
-//! 5. [Plan 1b: HSL, curves, grading, range-mask eval on the ORIGINAL linear pixel, mask
-//!    composite, detail]
-//! 6. finiteness check. Clamping happens only in `buffer::quantize` (A3 point ①).
+//! 5. global color, per pixel on encoded values: (a) tone curve, master then per channel
+//!    (`curve`), (b) HSL 8 bands (`hsl`), (c) color grading (`grade`), (d) split toning
+//!    (`grade`). Inactive features are skipped, so recipes that do not use them render
+//!    bit-identically to Plan 1a.
+//! 6. [Plan 1b later splits: range-mask eval on the ORIGINAL linear pixel, mask composite,
+//!    detail]
+//! 7. finiteness check. Clamping happens only in `buffer::quantize` (A3 point ①).
 //!
 //! Input and output are encoded-sRGB `ImageF32` of the SAME size, always (master plan A10):
 //! the recipe's `crop` is never applied here. Cropping is a separate display operation
@@ -151,7 +155,7 @@ fn global_encoded(enc: [f32; 3], ops: &GlobalOps) -> [f32; 3] {
     px
 }
 
-/// Stage 6.
+/// Stage 7.
 fn finite(out: ImageF32) -> Result<ImageF32, RenderError> {
     if out.samples().iter().all(|v| v.is_finite()) {
         Ok(out)
@@ -213,7 +217,9 @@ pub fn render_rgba8(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::recipe::{Crop, Mask, RangeChannel};
+    use crate::recipe::{
+        identity_curve, ColorGrade, Crop, GradeZone, Hsl, Mask, RangeChannel, SplitToning,
+    };
 
     fn gradient(w: u32, h: u32) -> ImageF32 {
         let t = |i: u32, n: u32| {
@@ -456,7 +462,11 @@ mod tests {
             r.color_grade.blending = 80.0;
             r.detail.sharpen_radius = 2.0;
         });
-        assert!(render(&src, &r, &CTX).is_ok());
+        let base = norm(|r| r.detail.sharpen_radius = 2.0);
+        assert_same_bits(
+            &render(&src, &r, &CTX).unwrap(),
+            &render(&src, &base, &CTX).unwrap(),
+        );
     }
 
     /// 256×4: column v; rows (v,0,0), (0,v,0), (0,0,v), (v,255-v,v/2).
@@ -509,14 +519,201 @@ mod tests {
         out
     }
 
-    #[test]
-    fn lut_render_matches_reference_on_grid() {
+    /// The LUT path must equal the reference `render` bit for bit on every 8-bit level.
+    fn assert_lut_matches_reference(recipes: &[Normalized]) {
         let src = all_levels();
-        for (k, r) in basic_grid().iter().enumerate() {
+        for (k, r) in recipes.iter().enumerate() {
             let reference = render(&ImageF32::from_rgba8(&src), r, &CTX).unwrap();
             let fast = render_rgba8_f32(&src, r, CTX).unwrap();
             assert_same_bits(&fast, &reference);
             assert_eq!(fast.to_rgba8(), reference.to_rgba8(), "recipe {k}");
+        }
+    }
+
+    #[test]
+    fn lut_render_matches_reference_on_grid() {
+        assert_lut_matches_reference(&basic_grid());
+    }
+
+    /// One setting per stage-5 feature, plus basic values that push samples outside [0, 1]
+    /// before stage 5.
+    fn color_features() -> [fn(&mut Recipe); 6] {
+        [
+            |r| {
+                r.tone_curve.master = vec![
+                    [0.0, 20.0],
+                    [64.0, 40.0],
+                    [128.0, 128.0],
+                    [192.0, 215.0],
+                    [255.0, 240.0],
+                ];
+            },
+            |r| {
+                r.tone_curve.red = vec![[0.0, 0.0], [128.0, 150.0], [255.0, 255.0]];
+                r.tone_curve.blue = vec![[0.0, 30.0], [255.0, 220.0]];
+            },
+            |r| {
+                r.hsl.hue = [100.0, -100.0, 50.0, -50.0, 30.0, -30.0, 70.0, -70.0];
+                r.hsl.saturation = [60.0, -40.0, 20.0, -100.0, 100.0, 35.0, -15.0, 5.0];
+                r.hsl.luminance = [-50.0, 25.0, 40.0, -20.0, 10.0, -60.0, 100.0, -100.0];
+            },
+            |r| {
+                r.color_grade = ColorGrade {
+                    shadows: GradeZone {
+                        hue: 220.0,
+                        sat: 80.0,
+                        lum: -40.0,
+                    },
+                    midtones: GradeZone {
+                        hue: 30.0,
+                        sat: 25.0,
+                        lum: 10.0,
+                    },
+                    highlights: GradeZone {
+                        hue: 50.0,
+                        sat: 60.0,
+                        lum: 30.0,
+                    },
+                    global: GradeZone {
+                        hue: 300.0,
+                        sat: 10.0,
+                        lum: -5.0,
+                    },
+                    blending: 80.0,
+                    balance: -30.0,
+                };
+            },
+            |r| {
+                r.split_toning = SplitToning {
+                    shadow_hue: 180.0,
+                    shadow_sat: 60.0,
+                    highlight_hue: 40.0,
+                    highlight_sat: 70.0,
+                    balance: 30.0,
+                };
+            },
+            |r| {
+                r.basic.exposure = 2.5;
+                r.basic.contrast = 80.0;
+                r.basic.vibrance = -60.0;
+            },
+        ]
+    }
+
+    /// Every subset of `color_features`, the full set last.
+    fn color_grid() -> Vec<Normalized> {
+        let features = color_features();
+        (0..1u32 << features.len())
+            .map(|bits| {
+                norm(|r| {
+                    for (i, f) in features.iter().enumerate() {
+                        if bits >> i & 1 == 1 {
+                            f(r);
+                        }
+                    }
+                })
+            })
+            .collect()
+    }
+
+    #[test]
+    fn lut_render_matches_reference_on_color_grid() {
+        assert_lut_matches_reference(&color_grid());
+    }
+
+    #[test]
+    fn inactive_global_color_settings_are_bitwise_noops() {
+        let src = all_levels();
+        let base = norm(|r| {
+            r.basic.exposure = 0.4;
+            r.basic.saturation = 20.0;
+        });
+        let inert = norm(|r| {
+            r.basic.exposure = 0.4;
+            r.basic.saturation = 20.0;
+            r.tone_curve.green = identity_curve();
+            r.color_grade.midtones.hue = 120.0;
+            r.color_grade.blending = 0.0;
+            r.color_grade.balance = 100.0;
+            r.split_toning.shadow_hue = 200.0;
+            r.split_toning.balance = -100.0;
+        });
+        assert_eq!(
+            render_rgba8(&src, &inert, &CTX).unwrap(),
+            render_rgba8(&src, &base, &CTX).unwrap()
+        );
+        assert_same_bits(
+            &render(&ImageF32::from_rgba8(&src), &inert, &CTX).unwrap(),
+            &render(&ImageF32::from_rgba8(&src), &base, &CTX).unwrap(),
+        );
+    }
+
+    #[test]
+    fn extreme_global_color_values_stay_finite() {
+        let src = ImageF32::from_rgba8(&all_levels());
+        for bits in 0..128u32 {
+            let on = |i: u32| bits >> i & 1 == 1;
+            let pm = |i: u32| if on(i) { 100.0 } else { -100.0 };
+            let r = norm(|r| {
+                r.basic.exposure = if on(0) { 5.0 } else { -5.0 };
+                r.basic.contrast = pm(1);
+                r.hsl = Hsl {
+                    hue: [pm(2); 8],
+                    saturation: [pm(2); 8],
+                    luminance: [pm(2); 8],
+                };
+                r.tone_curve.master = if on(3) {
+                    vec![[0.0, 0.0], [1.0, 255.0], [255.0, 255.0]]
+                } else {
+                    vec![[0.0, 255.0], [255.0, 0.0]]
+                };
+                let z = GradeZone {
+                    hue: 300.0,
+                    sat: 100.0,
+                    lum: pm(4),
+                };
+                r.color_grade = ColorGrade {
+                    shadows: z,
+                    midtones: z,
+                    highlights: z,
+                    global: z,
+                    blending: if on(5) { 100.0 } else { 0.0 },
+                    balance: pm(5),
+                };
+                r.split_toning = SplitToning {
+                    shadow_hue: 200.0,
+                    shadow_sat: 100.0,
+                    highlight_hue: 30.0,
+                    highlight_sat: 100.0,
+                    balance: pm(6),
+                };
+            });
+            assert!(render(&src, &r, &CTX).is_ok(), "combination {bits:#09b}");
+        }
+    }
+
+    /// Order-only check: each stage's own effect is verified by its module's tests.
+    #[test]
+    fn stage_5_order_is_curves_hsl_grading_split() {
+        let all = color_grid().pop().unwrap();
+        let rec = all.recipe();
+        let ops = GlobalOps::new(rec);
+        let curves = curve::CurveSet::new(&rec.tone_curve).unwrap();
+        let hsl = hsl::HslPlan::new(&rec.hsl).unwrap();
+        let grade = grade::GradePlan::new(&rec.color_grade).unwrap();
+        let split = grade::SplitPlan::new(&rec.split_toning).unwrap();
+        let b = &rec.basic;
+        for px in [[0.1, 0.5, 0.9], [0.8, 0.3, 0.2], [1.6, 1.1, 0.4]] {
+            let stage4 = basic::apply_color_encoded(
+                basic::apply_tone_encoded(px, b),
+                b.vibrance,
+                b.saturation,
+            );
+            let expected = split.apply(grade.apply(hsl.apply(curves.apply(stage4))));
+            assert_eq!(
+                global_encoded(px, &ops).map(f32::to_bits),
+                expected.map(f32::to_bits)
+            );
         }
     }
 
