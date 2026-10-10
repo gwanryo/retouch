@@ -47,7 +47,8 @@ pub struct Hsl {
     pub luminance: [f32; 8],
 }
 
-/// Tone curves, points `[x, y]` in 0..255, x strictly increasing, 2..=16 points (Plan 1b).
+/// Tone curves, points `[x, y]` in 0..255, each x at least 1 greater than the previous one,
+/// 2..=16 points (Plan 1b).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ToneCurve {

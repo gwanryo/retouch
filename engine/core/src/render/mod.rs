@@ -21,10 +21,11 @@
 //! [`render_rgba8`]); stages are never reordered to fit the LUT.
 
 pub mod basic;
+mod curve;
 
 use crate::buffer::{dequantize, BufferError, ImageF32, Rgba8};
 use crate::color::{srgb_decode, srgb_encode};
-use crate::recipe::{identity_curve, Basic, Normalized, Recipe};
+use crate::recipe::{Basic, Normalized, Recipe};
 use thiserror::Error;
 
 /// Per-render inputs that are not part of the recipe.
@@ -53,16 +54,14 @@ pub enum RenderError {
     Buffer(#[from] BufferError),
 }
 
-/// First feature in `r` that Plan 1a cannot render, if any. "Active" means it changes pixels;
-/// Plan 1b's renderer must treat every inactive case as a no-op too. `crop` is never listed:
-/// render ignores it by contract (A10).
+/// First feature in `r` that this build cannot render yet, if any. "Active" means it changes
+/// pixels; Plan 1b's renderer must treat every inactive case as a no-op too. `crop` is never
+/// listed: render ignores it by contract (A10).
 pub fn unsupported_feature(r: &Recipe) -> Option<&'static str> {
     let b = &r.basic;
     let zone_active = |z: &crate::recipe::GradeZone| z.sat != 0.0 || z.lum != 0.0;
     let g = &r.color_grade;
-    let t = &r.tone_curve;
-    let id = identity_curve();
-    let checks: [(&'static str, bool); 11] = [
+    let checks: [(&'static str, bool); 10] = [
         ("basic.texture", b.texture != 0.0),
         ("basic.clarity", b.clarity != 0.0),
         ("basic.dehaze", b.dehaze != 0.0),
@@ -74,12 +73,6 @@ pub fn unsupported_feature(r: &Recipe) -> Option<&'static str> {
                 .chain(&r.hsl.saturation)
                 .chain(&r.hsl.luminance)
                 .any(|&v| v != 0.0),
-        ),
-        (
-            "tone_curve",
-            [&t.master, &t.red, &t.green, &t.blue]
-                .iter()
-                .any(|c| **c != id),
         ),
         (
             "color_grade",
@@ -111,7 +104,8 @@ pub fn render(
     let r = recipe.recipe();
     reject_unsupported(r)?;
     let b = &r.basic;
-    let out = src.map_pixels(|px| global_encoded(linear_stage(px.map(srgb_decode), b), b));
+    let ops = GlobalOps::new(r);
+    let out = src.map_pixels(|px| global_encoded(linear_stage(px.map(srgb_decode), b), &ops));
     finite(out)
 }
 
@@ -133,10 +127,32 @@ fn linear_stage(lin: [f32; 3], b: &Basic) -> [f32; 3] {
     lin.map(srgb_encode)
 }
 
-/// Stage 4: the per-pixel global encoded-domain ops shared by both entry points.
-fn global_encoded(enc: [f32; 3], b: &Basic) -> [f32; 3] {
+/// Stages 4-5, prepared once per render. Inactive stage-5 features are `None` and never run, so
+/// a recipe that does not use them renders bit-identically to Plan 1a.
+struct GlobalOps<'a> {
+    basic: &'a Basic,
+    curves: Option<curve::CurveSet>,
+}
+
+impl<'a> GlobalOps<'a> {
+    fn new(r: &'a Recipe) -> Self {
+        Self {
+            basic: &r.basic,
+            curves: curve::CurveSet::new(&r.tone_curve),
+        }
+    }
+}
+
+/// Stages 4-5 for one encoded pixel, shared by both entry points: basic tone and color (4),
+/// then tone curve (5a).
+fn global_encoded(enc: [f32; 3], ops: &GlobalOps) -> [f32; 3] {
+    let b = ops.basic;
     let enc = basic::apply_tone_encoded(enc, b);
-    basic::apply_color_encoded(enc, b.vibrance, b.saturation)
+    let mut px = basic::apply_color_encoded(enc, b.vibrance, b.saturation);
+    if let Some(c) = &ops.curves {
+        px = c.apply(px);
+    }
+    px
 }
 
 /// Stage 6.
@@ -172,6 +188,7 @@ pub(crate) fn render_rgba8_f32(
     reject_unsupported(r)?;
     let b = &r.basic;
     let lut = linear_stage_lut(b);
+    let ops = GlobalOps::new(r);
     let samples = src
         .data()
         .chunks_exact(4)
@@ -181,7 +198,7 @@ pub(crate) fn render_rgba8_f32(
                 lut[1][usize::from(p[1])],
                 lut[2][usize::from(p[2])],
             ];
-            global_encoded(enc, b)
+            global_encoded(enc, &ops)
         })
         .collect();
     finite(ImageF32::from_samples(src.width(), src.height(), samples)?)
@@ -357,13 +374,39 @@ mod tests {
     }
 
     #[test]
+    fn tone_curve_lifting_midtones_brightens_the_image() {
+        let src = gradient(16, 8);
+        let r = norm(|r| r.tone_curve.master = vec![[0.0, 0.0], [128.0, 170.0], [255.0, 255.0]]);
+        let out = render(&src, &r, &CTX).unwrap();
+        let mean = |img: &ImageF32| img.pixels().map(basic::luma).sum::<f32>();
+        assert!(mean(&out) > mean(&src));
+    }
+
+    /// Review Y1 on both entry points: the curves whose textbook tangent limiter gave NaN.
+    #[test]
+    fn tiny_secant_curves_render_finite_on_both_paths() {
+        let curves: [Vec<[f32; 2]>; 4] = [
+            vec![[0.0, 0.0], [1.0, 1e-38], [2.0, 255.0]],
+            vec![[0.0, 0.0], [128.0, 1e-38], [255.0, 255.0]],
+            vec![[0.0, 255.0], [1.0, 1e-38], [2.0, 0.0]],
+            vec![[0.0, 255.0], [128.0, 1e-38], [255.0, 0.0]],
+        ];
+        for pts in curves {
+            let r = norm(|r| r.tone_curve.master = pts.clone());
+            for v in [0u8, 1, 128, 255] {
+                let src = Rgba8::new(1, 1, vec![v, v, v, 255]).unwrap();
+                let general = render(&ImageF32::from_rgba8(&src), &r, &CTX);
+                let fast = render_rgba8_f32(&src, &r, CTX);
+                let (general, fast) = (general.unwrap(), fast.unwrap());
+                assert_same_bits(&fast, &general);
+            }
+        }
+    }
+
+    #[test]
     fn rejects_each_plan_1b_feature_instead_of_ignoring_it() {
         assert_eq!(rejected(|r| r.basic.clarity = 10.0), "basic.clarity");
         assert_eq!(rejected(|r| r.hsl.saturation[2] = -20.0), "hsl");
-        assert_eq!(
-            rejected(|r| r.tone_curve.red[1] = [255.0, 200.0]),
-            "tone_curve"
-        );
         assert_eq!(
             rejected(|r| r.color_grade.midtones.sat = 10.0),
             "color_grade"
