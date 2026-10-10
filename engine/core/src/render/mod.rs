@@ -22,6 +22,7 @@
 
 pub mod basic;
 mod curve;
+mod grade;
 mod hsl;
 
 use crate::buffer::{dequantize, BufferError, ImageF32, Rgba8};
@@ -60,22 +61,10 @@ pub enum RenderError {
 /// listed: render ignores it by contract (A10).
 pub fn unsupported_feature(r: &Recipe) -> Option<&'static str> {
     let b = &r.basic;
-    let zone_active = |z: &crate::recipe::GradeZone| z.sat != 0.0 || z.lum != 0.0;
-    let g = &r.color_grade;
-    let checks: [(&'static str, bool); 9] = [
+    let checks: [(&'static str, bool); 7] = [
         ("basic.texture", b.texture != 0.0),
         ("basic.clarity", b.clarity != 0.0),
         ("basic.dehaze", b.dehaze != 0.0),
-        (
-            "color_grade",
-            [&g.shadows, &g.midtones, &g.highlights, &g.global]
-                .into_iter()
-                .any(zone_active),
-        ),
-        (
-            "split_toning",
-            r.split_toning.shadow_sat != 0.0 || r.split_toning.highlight_sat != 0.0,
-        ),
         ("detail.sharpen", r.detail.sharpen_amount != 0.0),
         ("detail.grain", r.detail.grain_amount != 0.0),
         ("detail.vignette", r.detail.vignette_amount != 0.0),
@@ -125,6 +114,8 @@ struct GlobalOps<'a> {
     basic: &'a Basic,
     curves: Option<curve::CurveSet>,
     hsl: Option<hsl::HslPlan>,
+    grade: Option<grade::GradePlan>,
+    split: Option<grade::SplitPlan>,
 }
 
 impl<'a> GlobalOps<'a> {
@@ -133,12 +124,14 @@ impl<'a> GlobalOps<'a> {
             basic: &r.basic,
             curves: curve::CurveSet::new(&r.tone_curve),
             hsl: hsl::HslPlan::new(&r.hsl),
+            grade: grade::GradePlan::new(&r.color_grade),
+            split: grade::SplitPlan::new(&r.split_toning),
         }
     }
 }
 
 /// Stages 4-5 for one encoded pixel, shared by both entry points: basic tone and color (4),
-/// then tone curve (5a) and HSL (5b).
+/// then tone curve (5a), HSL (5b), color grading (5c) and split toning (5d).
 fn global_encoded(enc: [f32; 3], ops: &GlobalOps) -> [f32; 3] {
     let b = ops.basic;
     let enc = basic::apply_tone_encoded(enc, b);
@@ -148,6 +141,12 @@ fn global_encoded(enc: [f32; 3], ops: &GlobalOps) -> [f32; 3] {
     }
     if let Some(h) = &ops.hsl {
         px = h.apply(px);
+    }
+    if let Some(g) = &ops.grade {
+        px = g.apply(px);
+    }
+    if let Some(s) = &ops.split {
+        px = s.apply(px);
     }
     px
 }
@@ -412,14 +411,6 @@ mod tests {
     #[test]
     fn rejects_each_plan_1b_feature_instead_of_ignoring_it() {
         assert_eq!(rejected(|r| r.basic.clarity = 10.0), "basic.clarity");
-        assert_eq!(
-            rejected(|r| r.color_grade.midtones.sat = 10.0),
-            "color_grade"
-        );
-        assert_eq!(
-            rejected(|r| r.split_toning.highlight_sat = 5.0),
-            "split_toning"
-        );
         assert_eq!(rejected(|r| r.detail.grain_amount = 30.0), "detail.grain");
         assert_eq!(
             rejected(|r| r.detail.vignette_amount = -30.0),
@@ -436,6 +427,25 @@ mod tests {
             })),
             "masks"
         );
+    }
+
+    #[test]
+    fn split_toning_warms_highlights() {
+        let src = ImageF32::new_filled(2, 2, [0.9; 3]).unwrap();
+        let r = norm(|r| {
+            r.split_toning.highlight_hue = 40.0;
+            r.split_toning.highlight_sat = 80.0;
+        });
+        let px = render(&src, &r, &CTX).unwrap().pixel(1, 1);
+        assert!(px[0] > px[2], "{px:?}");
+    }
+
+    #[test]
+    fn color_grade_lifts_shadows_in_render() {
+        let src = ImageF32::new_filled(2, 2, [0.1; 3]).unwrap();
+        let r = norm(|r| r.color_grade.shadows.lum = 100.0);
+        let px = render(&src, &r, &CTX).unwrap().pixel(0, 1);
+        assert!(px.iter().all(|&v| (v - 0.2).abs() <= 1e-6), "{px:?}");
     }
 
     #[test]
