@@ -8,7 +8,6 @@ use super::basic;
 
 /// Single-channel row-major f32 image.
 #[derive(Clone, Debug, PartialEq)]
-#[cfg_attr(not(test), expect(dead_code, reason = "consumed by clarity (Task 4)"))]
 pub(crate) struct Plane {
     /// Width in pixels.
     pub(crate) width: usize,
@@ -20,7 +19,6 @@ pub(crate) struct Plane {
 
 impl Plane {
     /// Rec.709 luma plane of an interleaved RGB f32 buffer.
-    #[cfg_attr(not(test), expect(dead_code, reason = "consumed by clarity (Task 4)"))]
     pub(crate) fn luma_of(rgb: &[f32], width: usize, height: usize) -> Plane {
         let data = rgb
             .chunks_exact(3)
@@ -75,7 +73,6 @@ fn separable(src: &mut Plane, pass: &dyn Fn(&[f32], &mut [f32])) {
 }
 
 /// Three rounds of (horizontal, vertical) box blur with the given radius in pixels.
-#[cfg_attr(not(test), expect(dead_code, reason = "consumed by clarity (Task 4)"))]
 pub(crate) fn box_blur3(src: &Plane, radius: usize) -> Plane {
     let mut p = src.clone();
     for _ in 0..3 {

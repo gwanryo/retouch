@@ -49,14 +49,11 @@ pub(super) struct Memo<V: Copy> {
 }
 
 /// Output bytes of stages 1-5 through the final quantization.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the shared driver names `Memo<V>` directly")
-)]
+#[cfg(test)]
 pub(super) type ByteMemo = Memo<[u8; 3]>;
 
 /// Unquantized stage 1-5 output.
-#[cfg_attr(not(test), expect(dead_code, reason = "spatial path (Task 4)"))]
+#[cfg(test)]
 pub(super) type F32Memo = Memo<[f32; 3]>;
 
 impl<V: Copy + Default> Memo<V> {
