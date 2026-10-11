@@ -70,11 +70,7 @@ pub enum RenderError {
 /// pixels; Plan 1b's renderer must treat every inactive case as a no-op too. `crop` is never
 /// listed: render ignores it by contract (A10).
 pub fn unsupported_feature(r: &Recipe) -> Option<&'static str> {
-    let checks: [(&'static str, bool); 3] = [
-        ("detail.grain", r.detail.grain_amount != 0.0),
-        ("detail.vignette", r.detail.vignette_amount != 0.0),
-        ("masks", !r.masks.is_empty()),
-    ];
+    let checks: [(&'static str, bool); 1] = [("masks", !r.masks.is_empty())];
     checks
         .into_iter()
         .find(|&(_, active)| active)
@@ -693,12 +689,23 @@ mod tests {
     }
 
     #[test]
-    fn rejects_each_plan_1b_feature_instead_of_ignoring_it() {
-        assert_eq!(rejected(|r| r.detail.grain_amount = 30.0), "detail.grain");
-        assert_eq!(
-            rejected(|r| r.detail.vignette_amount = -30.0),
-            "detail.vignette"
-        );
+    fn seed_changes_pixels_only_when_grain_is_active() {
+        let src = noise(40, 30, 4);
+        let render_with =
+            |r: &Normalized, seed| render_rgba8(&src, r, &RenderContext { seed }).unwrap();
+        let no_grain = norm(|r| {
+            r.detail.vignette_amount = -40.0;
+            r.detail.sharpen_amount = 50.0;
+            r.basic.clarity = 20.0;
+        });
+        assert_eq!(render_with(&no_grain, 1), render_with(&no_grain, 2));
+        let grain = norm(|r| r.detail.grain_amount = 40.0);
+        assert_ne!(render_with(&grain, 1), render_with(&grain, 2));
+        assert_eq!(render_with(&grain, 1), render_with(&grain, 1));
+    }
+
+    #[test]
+    fn rejects_masks_until_split_4() {
         assert_eq!(
             rejected(|r| r.masks.push(Mask::Range {
                 channel: RangeChannel::Luminance,
