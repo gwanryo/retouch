@@ -49,8 +49,38 @@ impl Sharpen {
         })
     }
 
-    /// Sharpens the interleaved RGB buffer in place.
+    /// Sharpens the interleaved RGB buffer in place, row by row (per pixel the same operations as
+    /// the pixel-order reference loop).
     pub(crate) fn apply(&self, rgb: &mut [f32], width: usize, height: usize) {
+        let y = Plane::luma_of(rgb, width, height);
+        let b = gaussian_blur(&y, &self.kernel);
+        for (row, line) in rgb.chunks_exact_mut(3 * width).take(height).enumerate() {
+            let cur = row * width;
+            let up = row.saturating_sub(1) * width;
+            let down = (row + 1).min(height - 1) * width;
+            let (y_row, b_row) = (&y.data[cur..cur + width], &b.data[cur..cur + width]);
+            for (x, px) in line.chunks_exact_mut(3).enumerate() {
+                let d = y_row[x] - b_row[x];
+                let damped = d / (1.0 + self.halo * d.abs());
+                let m = match self.edge {
+                    Some(t) => {
+                        let g = (b_row[(x + 1).min(width - 1)] - b_row[x.saturating_sub(1)]).abs()
+                            + (b.data[down + x] - b.data[up + x]).abs();
+                        smoothstep(0.5 * t, t, g)
+                    }
+                    None => 1.0,
+                };
+                let delta = self.amount * m * damped;
+                for v in px {
+                    *v += delta;
+                }
+            }
+        }
+    }
+
+    /// The original pixel-order loop: the oracle for [`Sharpen::apply`].
+    #[cfg(test)]
+    pub(crate) fn apply_ref(&self, rgb: &mut [f32], width: usize, height: usize) {
         let y = Plane::luma_of(rgb, width, height);
         let b = gaussian_blur(&y, &self.kernel);
         let at = |x: usize, row: usize| b.data[row * width + x];
@@ -98,11 +128,39 @@ impl Vignette {
     }
 
     /// Radial weight in [0, 1] of pixel `(x, y)`: the radius is normalized per axis, so the
-    /// falloff is an ellipse following the frame aspect.
+    /// falloff is an ellipse following the frame aspect. This is the defining per-pixel form;
+    /// renders use [`Vignette::weight_sq`] with per-axis tables, which is bit-identical.
+    #[cfg(test)]
     pub(crate) fn weight(&self, x: usize, y: usize, width: usize, height: usize) -> f32 {
         let u = ((x as f32 + 0.5) / width as f32) * 2.0 - 1.0;
         let v = ((y as f32 + 0.5) / height as f32) * 2.0 - 1.0;
         let r = ((u * u + v * v) * 0.5).sqrt();
+        smoothstep(
+            self.center - self.half_width,
+            self.center + self.half_width,
+            r,
+        )
+    }
+
+    /// `u * u` of every column, the same expression as in [`Vignette::weight`].
+    pub(crate) fn column_u2(width: usize) -> Vec<f32> {
+        (0..width)
+            .map(|x| {
+                let u = ((x as f32 + 0.5) / width as f32) * 2.0 - 1.0;
+                u * u
+            })
+            .collect()
+    }
+
+    /// `v * v` of row `y`, the same expression as in [`Vignette::weight`].
+    pub(crate) fn row_v2(y: usize, height: usize) -> f32 {
+        let v = ((y as f32 + 0.5) / height as f32) * 2.0 - 1.0;
+        v * v
+    }
+
+    /// [`Vignette::weight`] from the precomputed squares `u * u` and `v * v` (bit-identical).
+    pub(crate) fn weight_sq(&self, u2: f32, v2: f32) -> f32 {
+        let r = ((u2 + v2) * 0.5).sqrt();
         smoothstep(
             self.center - self.half_width,
             self.center + self.half_width,
@@ -133,7 +191,8 @@ fn lattice(seed: u32, i: u32, j: u32) -> f32 {
     (grain_hash(seed, i, j) >> 8) as f32 / 16_777_216.0 - 0.5
 }
 
-/// Smooth value noise at `(px, py)`, both positive.
+/// Smooth value noise at `(px, py)`, both positive (defining form; `GrainRows` is the table form).
+#[cfg(test)]
 fn value_noise(seed: u32, px: f32, py: f32) -> f32 {
     let (fx, fy) = (px.floor(), py.floor());
     let (i, j) = (fx as u32, fy as u32);
@@ -170,7 +229,9 @@ impl Grain {
         })
     }
 
-    /// Two-octave value noise of pixel `(x, y)`, roughly in [-0.5, 0.5].
+    /// Two-octave value noise of pixel `(x, y)`, roughly in [-0.5, 0.5]. This is the defining
+    /// per-pixel form; renders use [`GrainRows`], which is bit-identical.
+    #[cfg(test)]
     pub(crate) fn noise(&self, seed: u32, x: usize, y: usize) -> f32 {
         let p = ((x as f32 + 0.5) / self.cell, (y as f32 + 0.5) / self.cell);
         let n1 = value_noise(seed, p.0, p.1);
@@ -183,6 +244,116 @@ impl Grain {
         let y = luma(px).clamp(0.0, 1.0);
         let delta = self.amount * noise * (0.25 + 0.75 * 4.0 * y * (1.0 - y));
         px.map(|v| v + delta)
+    }
+}
+
+/// One axis of a noise coordinate `p`: lattice index `floor(p)` and smoothstep weight, the same
+/// expressions as in `value_noise`.
+#[derive(Clone, Copy)]
+struct AxisPos {
+    i: u32,
+    s: f32,
+}
+
+impl AxisPos {
+    fn new(p: f32) -> Self {
+        let f = p.floor();
+        let t = p - f;
+        Self {
+            i: f as u32,
+            s: t * t * (3.0 - 2.0 * t),
+        }
+    }
+}
+
+/// Lattice rows `j` and `j + 1` of one octave over the columns a row needs, recomputed only when
+/// `j` changes (shifted by one when `j` advances by one).
+struct LatticeRows {
+    seed: u32,
+    j: Option<u32>,
+    top: Vec<f32>,
+    bottom: Vec<f32>,
+}
+
+impl LatticeRows {
+    fn new(seed: u32, len: usize) -> Self {
+        Self {
+            seed,
+            j: None,
+            top: vec![0.0; len],
+            bottom: vec![0.0; len],
+        }
+    }
+
+    fn fill(seed: u32, j: u32, row: &mut [f32]) {
+        for (i, v) in (0u32..).zip(row.iter_mut()) {
+            *v = lattice(seed, i, j);
+        }
+    }
+
+    fn set_row(&mut self, j: u32) {
+        match self.j {
+            Some(old) if old == j => return,
+            Some(old) if old.wrapping_add(1) == j => {
+                std::mem::swap(&mut self.top, &mut self.bottom);
+                Self::fill(self.seed, j + 1, &mut self.bottom);
+            }
+            _ => {
+                Self::fill(self.seed, j, &mut self.top);
+                Self::fill(self.seed, j + 1, &mut self.bottom);
+            }
+        }
+        self.j = Some(j);
+    }
+
+    /// `value_noise` at column position `cx` and row weight `sy` of the current row pair.
+    fn eval(&self, cx: AxisPos, sy: f32) -> f32 {
+        let i = cx.i as usize;
+        let (a, b) = (self.top[i], self.top[i + 1]);
+        let (c, d) = (self.bottom[i], self.bottom[i + 1]);
+        let top = a + (b - a) * cx.s;
+        let bottom = c + (d - c) * cx.s;
+        top + (bottom - top) * sy
+    }
+}
+
+/// Grain noise for whole rows from per-column tables: `noise_row(y)` equals
+/// [`Grain::noise`] at every `(x, y)` bit for bit.
+pub(crate) struct GrainRows<'a> {
+    grain: &'a Grain,
+    cols1: Vec<AxisPos>,
+    cols2: Vec<AxisPos>,
+    octave1: LatticeRows,
+    octave2: LatticeRows,
+}
+
+impl<'a> GrainRows<'a> {
+    pub(crate) fn new(grain: &'a Grain, seed: u32, width: usize) -> Self {
+        let px = |x: usize| (x as f32 + 0.5) / grain.cell;
+        let cols1: Vec<AxisPos> = (0..width).map(|x| AxisPos::new(px(x))).collect();
+        let cols2: Vec<AxisPos> = (0..width).map(|x| AxisPos::new(2.0 * px(x))).collect();
+        let len = |cols: &[AxisPos]| cols.iter().map(|c| c.i as usize).max().unwrap_or(0) + 2;
+        Self {
+            grain,
+            octave1: LatticeRows::new(seed, len(&cols1)),
+            octave2: LatticeRows::new(seed ^ GRAIN_OCTAVE_SEED, len(&cols2)),
+            cols1,
+            cols2,
+        }
+    }
+
+    /// Noise of every pixel of row `y` into `out` (one value per column).
+    pub(crate) fn noise_row(&mut self, y: usize, out: &mut [f32]) {
+        let py = (y as f32 + 0.5) / self.grain.cell;
+        let (r1, r2) = (AxisPos::new(py), AxisPos::new(2.0 * py));
+        self.octave1.set_row(r1.i);
+        self.octave2.set_row(r2.i);
+        let rough = self.grain.rough;
+        for ((o, c1), c2) in out.iter_mut().zip(&self.cols1).zip(&self.cols2) {
+            let n1 = self.octave1.eval(*c1, r1.s);
+            let n2 = self.octave2.eval(*c2, r2.s);
+            *o = n1 * (1.0 - 0.5 * rough) + n2 * (0.5 * rough);
+        }
     }
 }
 
