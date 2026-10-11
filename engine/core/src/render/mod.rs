@@ -25,6 +25,7 @@
 //! [`render_rgba8`]); stages are never reordered to fit the LUT.
 
 pub mod basic;
+mod blur;
 mod curve;
 mod grade;
 mod hsl;
