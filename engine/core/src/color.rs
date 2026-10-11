@@ -93,8 +93,184 @@ pub fn linear_srgb_to_lab_d50(r: f32, g: f32, b: f32) -> Lab {
     }
 }
 
-/// CIEDE2000 color difference with `kL = kC = kH = 1` (AC-S1f). f64 + `libm` throughout.
+/// CIEDE2000 color difference with `kL = kC = kH = 1` (AC-S1f). f64 throughout; the
+/// transcendentals (`atan2`, `cos`, `sin`, `exp`, `pow`) are `libm`.
 pub fn delta_e00(c1: Lab, c2: Lab) -> f64 {
+    delta_e00_with_chroma(c1, hypot_hw(c1.a, c1.b), c2, hypot_hw(c2.a, c2.b))
+}
+
+/// [`delta_e00`] given each color's chroma `C*ab = hypot(a, b)`, so a caller that sees a color
+/// many times computes it once.
+///
+/// Bit-identical to the all-`libm` formula: `sqrt` is IEEE 754 correctly rounded, so the
+/// hardware `f64::sqrt` returns the same bits as `libm::sqrt`; `libm::pow(x, 2.0)` returns
+/// exactly `x * x` (its `y == 2` special case); `hypot` is [`hypot_hw`]. Only `pow(x, 7.0)`
+/// stays `libm` (a multiplication chain rounds differently).
+pub(crate) fn delta_e00_with_chroma(c1: Lab, c1ab: f64, c2: Lab, c2ab: f64) -> f64 {
+    use libm::{atan2, cos, exp, pow, sin};
+    use std::f64::consts::PI;
+    const TWO_PI: f64 = 2.0 * PI;
+    const POW25_7: f64 = 6_103_515_625.0; // 25^7
+
+    let sqrt = f64::sqrt;
+    let sq = |x: f64| x * x;
+    let hue = |a: f64, b: f64| -> f64 {
+        if a == 0.0 && b == 0.0 {
+            0.0
+        } else {
+            let h = atan2(b, a);
+            if h < 0.0 {
+                h + TWO_PI
+            } else {
+                h
+            }
+        }
+    };
+
+    let cbar = (c1ab + c2ab) / 2.0;
+    let cbar7 = pow(cbar, 7.0);
+    let g = 0.5 * (1.0 - sqrt(cbar7 / (cbar7 + POW25_7)));
+
+    let a1p = (1.0 + g) * c1.a;
+    let a2p = (1.0 + g) * c2.a;
+    let c1p = hypot_hw(a1p, c1.b);
+    let c2p = hypot_hw(a2p, c2.b);
+    let h1p = hue(a1p, c1.b);
+    let h2p = hue(a2p, c2.b);
+
+    let dlp = c2.l - c1.l;
+    let dcp = c2p - c1p;
+    let dhp = if c1p * c2p == 0.0 {
+        0.0
+    } else {
+        let d = h2p - h1p;
+        if d.abs() <= PI {
+            d
+        } else if d > PI {
+            d - TWO_PI
+        } else {
+            d + TWO_PI
+        }
+    };
+    let dhp_big = 2.0 * sqrt(c1p * c2p) * sin(dhp / 2.0);
+
+    let lbp = (c1.l + c2.l) / 2.0;
+    let cbp = (c1p + c2p) / 2.0;
+    let hbp = if c1p * c2p == 0.0 {
+        h1p + h2p
+    } else {
+        let s = h1p + h2p;
+        if (h1p - h2p).abs() <= PI {
+            s / 2.0
+        } else if s < TWO_PI {
+            (s + TWO_PI) / 2.0
+        } else {
+            (s - TWO_PI) / 2.0
+        }
+    };
+
+    let t = 1.0 - 0.17 * cos(hbp - PI / 6.0)
+        + 0.24 * cos(2.0 * hbp)
+        + 0.32 * cos(3.0 * hbp + PI / 30.0)
+        - 0.20 * cos(4.0 * hbp - 63.0 * PI / 180.0);
+    let hbp_deg = hbp * 180.0 / PI;
+    let dtheta = (30.0 * PI / 180.0) * exp(-sq((hbp_deg - 275.0) / 25.0));
+    let cbp7 = pow(cbp, 7.0);
+    let rc = 2.0 * sqrt(cbp7 / (cbp7 + POW25_7));
+    let lbp50 = sq(lbp - 50.0);
+    let sl = 1.0 + 0.015 * lbp50 / sqrt(20.0 + lbp50);
+    let sc = 1.0 + 0.045 * cbp;
+    let sh = 1.0 + 0.015 * cbp * t;
+    let rt = -sin(2.0 * dtheta) * rc;
+
+    let tl = dlp / sl;
+    let tc = dcp / sc;
+    let th = dhp_big / sh;
+    sqrt(tl * tl + tc * tc + th * th + rt * tc * th)
+}
+
+// `hypot_hw` is a copy of `hypot` from the `libm` crate 0.2.16 (src/math/hypot.rs,
+// https://github.com/rust-lang/libm), itself a port of musl libc's src/math/hypot.c. The only
+// change is the final square root: the hardware `f64::sqrt` (IEEE 754 correctly rounded, so the
+// same bits as libm's software `sqrt`) instead of libm's software `sqrt`.
+//
+// libm crate: Copyright (c) 2018 Jorge Aparicio, MIT license.
+// musl libc:  Copyright © 2005-2020 Rich Felker, et al., MIT license.
+//
+// Permission is hereby granted, free of charge, to any person obtaining a copy of this software
+// and associated documentation files (the "Software"), to deal in the Software without
+// restriction, including without limitation the rights to use, copy, modify, merge, publish,
+// distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the
+// Software is furnished to do so, subject to the following conditions:
+//
+// The above copyright notice and this permission notice shall be included in all copies or
+// substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING
+// BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+// NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM,
+// DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+/// `libm::hypot` with a hardware square root: bit-identical to `libm::hypot` for every input
+/// (see the notice above).
+pub(crate) fn hypot_hw(x: f64, y: f64) -> f64 {
+    const SPLIT: f64 = 134_217_728. + 1.; // 0x1p27 + 1
+    fn sq(x: f64) -> (f64, f64) {
+        let xc = x * SPLIT;
+        let xh = x - xc + xc;
+        let xl = x - xh;
+        let hi = x * x;
+        let lo = xh * xh - hi + 2. * xh * xl + xl * xl;
+        (hi, lo)
+    }
+    let x1p700 = f64::from_bits(0x6bb0_0000_0000_0000); // 2^700
+    let x1p_700 = f64::from_bits(0x1430_0000_0000_0000); // 2^-700
+
+    // arrange |x| >= |y|
+    let mut uxi = x.to_bits() & (u64::MAX >> 1);
+    let mut uyi = y.to_bits() & (u64::MAX >> 1);
+    if uxi < uyi {
+        std::mem::swap(&mut uxi, &mut uyi);
+    }
+
+    // special cases
+    let ex = (uxi >> 52) as i64;
+    let ey = (uyi >> 52) as i64;
+    let mut x = f64::from_bits(uxi);
+    let mut y = f64::from_bits(uyi);
+    // note: hypot(inf, nan) == inf
+    if ey == 0x7ff {
+        return y;
+    }
+    if ex == 0x7ff || uyi == 0 {
+        return x;
+    }
+    // hypot(x, y) ~= x + y*y/x/2 with inexact for small y/x; a 64 difference is enough
+    if ex - ey > 64 {
+        return x + y;
+    }
+
+    // precise sqrt argument in nearest rounding mode without overflow:
+    // xh*xh must not overflow and xl*xl must not underflow in sq
+    let mut z = 1.;
+    if ex > 0x3ff + 510 {
+        z = x1p700;
+        x *= x1p_700;
+        y *= x1p_700;
+    } else if ey < 0x3ff - 450 {
+        z = x1p_700;
+        x *= x1p700;
+        y *= x1p700;
+    }
+    let (hx, lx) = sq(x);
+    let (hy, ly) = sq(y);
+    z * (ly + lx + hy + hx).sqrt()
+}
+
+/// The original all-`libm` CIEDE2000: the oracle for [`delta_e00`] (bit-identical).
+#[cfg(test)]
+fn delta_e00_libm(c1: Lab, c2: Lab) -> f64 {
     use libm::{atan2, cos, exp, hypot, pow, sin, sqrt};
     use std::f64::consts::PI;
     const TWO_PI: f64 = 2.0 * PI;
@@ -404,6 +580,147 @@ mod tests {
             };
             let sl = 1.0 + 0.015 * 25.0 / libm::sqrt(45.0);
             assert!((delta_e00(c1, c2) - 10.0 / sl).abs() < 1e-12);
+        }
+    }
+
+    /// Fixed-seed xorshift64 stream.
+    fn xorshift(mut s: u64) -> impl FnMut() -> u64 {
+        move || {
+            s ^= s << 13;
+            s ^= s >> 7;
+            s ^= s << 17;
+            s
+        }
+    }
+
+    fn same_f64(x: f64, y: f64) -> bool {
+        x.to_bits() == y.to_bits() || (x.is_nan() && y.is_nan())
+    }
+
+    const SPECIAL_F64: [f64; 16] = [
+        0.0,
+        -0.0,
+        1.0,
+        -1.0,
+        5e-324,
+        -5e-324,
+        2.2e-308,
+        1e-200,
+        1e-160,
+        127.5,
+        -128.0,
+        1e154,
+        1e300,
+        f64::MAX,
+        f64::INFINITY,
+        f64::NAN,
+    ];
+
+    mod hypot_hw {
+        use super::*;
+
+        #[test]
+        fn matches_libm_hypot_on_special_values() {
+            for x in SPECIAL_F64 {
+                for y in SPECIAL_F64 {
+                    for (a, b) in [(x, y), (-x, y), (x, f64::NEG_INFINITY)] {
+                        let (want, got) = (libm::hypot(a, b), crate::color::hypot_hw(a, b));
+                        assert!(same_f64(want, got), "{a} {b}: {want} vs {got}");
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn matches_libm_hypot_on_random_bit_patterns() {
+            let mut bits = xorshift(0x9E37_79B9_7F4A_7C15);
+            for _ in 0..1_000_000 {
+                let (a, b) = (f64::from_bits(bits()), f64::from_bits(bits()));
+                let (want, got) = (libm::hypot(a, b), crate::color::hypot_hw(a, b));
+                assert!(same_f64(want, got), "{a} {b}");
+            }
+        }
+
+        #[test]
+        fn matches_libm_hypot_on_lab_range_values() {
+            let mut bits = xorshift(1);
+            let mut rnd = || (bits() >> 11) as f64 / (1u64 << 53) as f64 * 300.0 - 150.0;
+            for _ in 0..1_000_000 {
+                let (a, b) = (rnd(), rnd());
+                assert_eq!(
+                    libm::hypot(a, b).to_bits(),
+                    crate::color::hypot_hw(a, b).to_bits(),
+                    "{a} {b}"
+                );
+            }
+        }
+    }
+
+    mod delta_e00_exact_ops {
+        use super::*;
+
+        #[test]
+        fn matches_the_libm_reference_on_random_lab_pairs() {
+            let mut bits = xorshift(0x1234_5678_9ABC_DEF0);
+            let mut rnd = || (bits() >> 11) as f64 / (1u64 << 53) as f64;
+            for _ in 0..200_000 {
+                let c1 = Lab {
+                    l: rnd() * 100.0,
+                    a: rnd() * 256.0 - 128.0,
+                    b: rnd() * 256.0 - 128.0,
+                };
+                // half near pairs (the scoring case), half unrelated pairs
+                let c2 = if rnd() < 0.5 {
+                    Lab {
+                        l: c1.l + rnd() * 4.0 - 2.0,
+                        a: c1.a + rnd() * 4.0 - 2.0,
+                        b: c1.b + rnd() * 4.0 - 2.0,
+                    }
+                } else {
+                    Lab {
+                        l: rnd() * 100.0,
+                        a: rnd() * 256.0 - 128.0,
+                        b: rnd() * 256.0 - 128.0,
+                    }
+                };
+                assert_eq!(
+                    delta_e00(c1, c2).to_bits(),
+                    delta_e00_libm(c1, c2).to_bits(),
+                    "{c1:?} {c2:?}"
+                );
+            }
+        }
+
+        #[test]
+        fn matches_the_libm_reference_on_special_values() {
+            let vals = SPECIAL_F64.iter().copied().filter(|v| v.is_finite());
+            let labs: Vec<Lab> = vals
+                .clone()
+                .flat_map(|l| {
+                    vals.clone()
+                        .flat_map(move |a| [Lab { l, a, b: a }, Lab { l, a, b: -a }])
+                })
+                .collect();
+            for (i, c1) in labs.iter().enumerate() {
+                for c2 in labs.iter().skip(i % 7).step_by(7) {
+                    let (want, got) = (delta_e00_libm(*c1, *c2), delta_e00(*c1, *c2));
+                    assert!(same_f64(want, got), "{c1:?} {c2:?}: {want} vs {got}");
+                }
+            }
+        }
+
+        #[test]
+        fn matches_the_libm_reference_on_the_sharma_vectors() {
+            for (c1, c2, _) in sharma_2005_rows() {
+                assert_eq!(
+                    delta_e00(c1, c2).to_bits(),
+                    delta_e00_libm(c1, c2).to_bits()
+                );
+                assert_eq!(
+                    delta_e00(c2, c1).to_bits(),
+                    delta_e00_libm(c2, c1).to_bits()
+                );
+            }
         }
     }
 }
