@@ -67,10 +67,9 @@ pub enum RenderError {
 /// listed: render ignores it by contract (A10).
 pub fn unsupported_feature(r: &Recipe) -> Option<&'static str> {
     let b = &r.basic;
-    let checks: [(&'static str, bool); 7] = [
+    let checks: [(&'static str, bool); 6] = [
         ("basic.texture", b.texture != 0.0),
         ("basic.clarity", b.clarity != 0.0),
-        ("basic.dehaze", b.dehaze != 0.0),
         ("detail.sharpen", r.detail.sharpen_amount != 0.0),
         ("detail.grain", r.detail.grain_amount != 0.0),
         ("detail.vignette", r.detail.vignette_amount != 0.0),
@@ -118,6 +117,8 @@ fn linear_stage(lin: [f32; 3], b: &Basic) -> [f32; 3] {
 /// a recipe that does not use them renders bit-identically to Plan 1a.
 struct GlobalOps<'a> {
     basic: &'a Basic,
+    /// Stage 4a, `dehaze / 100`; `None` when dehaze is 0.
+    dehaze: Option<f32>,
     curves: Option<curve::CurveSet>,
     hsl: Option<hsl::HslPlan>,
     grade: Option<grade::GradePlan>,
@@ -128,6 +129,7 @@ impl<'a> GlobalOps<'a> {
     fn new(r: &'a Recipe) -> Self {
         Self {
             basic: &r.basic,
+            dehaze: (r.basic.dehaze != 0.0).then(|| r.basic.dehaze / 100.0),
             curves: curve::CurveSet::new(&r.tone_curve),
             hsl: hsl::HslPlan::new(&r.hsl),
             grade: grade::GradePlan::new(&r.color_grade),
@@ -135,14 +137,19 @@ impl<'a> GlobalOps<'a> {
         }
     }
 
-    /// No stage-5 feature is active, so stage 4 alone is the whole of stages 4-5.
-    fn stage5_inactive(&self) -> bool {
-        self.curves.is_none() && self.hsl.is_none() && self.grade.is_none() && self.split.is_none()
+    /// Neither dehaze (4a) nor any stage-5 feature is active, so the basic tone and color of
+    /// stage 4 alone are the whole of stages 4-5.
+    fn only_basic(&self) -> bool {
+        self.dehaze.is_none()
+            && self.curves.is_none()
+            && self.hsl.is_none()
+            && self.grade.is_none()
+            && self.split.is_none()
     }
 }
 
 /// Stage 4 alone: the same calls, in the same order, as the stage-4 lines of [`global_encoded`],
-/// so it is bit-identical to it whenever [`GlobalOps::stage5_inactive`] holds. A separate body
+/// so it is bit-identical to it whenever [`GlobalOps::only_basic`] holds. A separate body
 /// (not called from `global_encoded`) gives the stage-5-free recipes their own monomorphic loop;
 /// sharing one generic loop with the stage-5 checks cost +10% render time (Task 6 profile F).
 fn basic_encoded(enc: [f32; 3], b: &Basic) -> [f32; 3] {
@@ -154,6 +161,10 @@ fn basic_encoded(enc: [f32; 3], b: &Basic) -> [f32; 3] {
 /// then tone curve (5a), HSL (5b), color grading (5c) and split toning (5d).
 fn global_encoded(enc: [f32; 3], ops: &GlobalOps) -> [f32; 3] {
     let b = ops.basic;
+    let enc = match ops.dehaze {
+        Some(d) => basic::apply_dehaze_encoded(enc, d),
+        None => enc,
+    };
     let enc = basic::apply_tone_encoded(enc, b);
     let mut px = basic::apply_color_encoded(enc, b.vibrance, b.saturation);
     if let Some(c) = &ops.curves {
@@ -270,7 +281,7 @@ fn render_rgba8_with(
     reject_unsupported(r)?;
     let lut = linear_stage_lut(&r.basic);
     let ops = GlobalOps::new(r);
-    let (data, stats) = if ops.stage5_inactive() {
+    let (data, stats) = if ops.only_basic() {
         let b = ops.basic;
         shade(src.data(), &lut, |enc| basic_encoded(enc, b), strategy)?
     } else {
@@ -1041,7 +1052,7 @@ mod tests {
         for r in &basic_grid() {
             let rec = r.recipe();
             let ops = GlobalOps::new(rec);
-            assert!(ops.stage5_inactive());
+            assert!(ops.only_basic());
             let lut = linear_stage_lut(&rec.basic);
             for p in src.data().chunks_exact(4) {
                 let enc = [
@@ -1063,8 +1074,32 @@ mod tests {
         let features = color_features();
         for f in &features[..5] {
             let r = norm(f);
-            assert!(!GlobalOps::new(r.recipe()).stage5_inactive());
+            assert!(!GlobalOps::new(r.recipe()).only_basic());
         }
-        assert!(GlobalOps::new(norm(|r| features[5](r)).recipe()).stage5_inactive());
+        assert!(GlobalOps::new(norm(|r| features[5](r)).recipe()).only_basic());
+        let r = norm(|r| r.basic.dehaze = 10.0);
+        assert!(!GlobalOps::new(r.recipe()).only_basic());
+    }
+
+    #[test]
+    fn dehaze_disables_the_basic_only_loop_and_renders() {
+        let r = norm(|r| r.basic.dehaze = 40.0);
+        assert!(!GlobalOps::new(r.recipe()).only_basic());
+        let src = ImageF32::new_filled(2, 2, [0.8; 3]).unwrap();
+        assert!(render(&src, &r, &CTX).unwrap().pixel(0, 0)[0] < 0.8);
+    }
+
+    #[test]
+    fn dehaze_lut_path_matches_reference_on_all_levels() {
+        let src = all_levels();
+        for d in [-100.0, -35.0, 20.0, 100.0] {
+            let r = norm(|r| r.basic.dehaze = d);
+            assert_eq!(
+                render_rgba8(&src, &r, &CTX).unwrap(),
+                render(&ImageF32::from_rgba8(&src), &r, &CTX)
+                    .unwrap()
+                    .to_rgba8()
+            );
+        }
     }
 }
