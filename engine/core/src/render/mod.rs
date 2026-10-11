@@ -298,21 +298,89 @@ fn shade<K: Fn([f32; 3]) -> [f32; 3]>(
     kernel: K,
     strategy: Strategy,
 ) -> Result<(Vec<u8>, MemoStats), RenderError> {
-    let mut out = Vec::with_capacity(px.len());
+    drive::<[u8; 3], u8, RenderError>(
+        px,
+        strategy,
+        px.len(),
+        |p| finish(kernel(lut_pixel(p, lut))),
+        |out, [r, g, b]| out.extend_from_slice(&[r, g, b, 255]),
+    )
+}
+
+/// Stages 4-5 by `kernel` on LUT-encoded RGBA8 pixels `px`, unquantized: RGB triples (length
+/// `3 * pixels`), no finiteness check, so NaN and infinity pass through with their bits. Same
+/// probe and fallback rules as [`shade`].
+#[cfg_attr(not(test), expect(dead_code, reason = "spatial path (Task 4)"))]
+fn shade_f32<K: Fn([f32; 3]) -> [f32; 3]>(
+    px: &[u8],
+    lut: &[[f32; 256]; 3],
+    kernel: K,
+    strategy: Strategy,
+) -> (Vec<f32>, MemoStats) {
+    let infallible = drive::<[f32; 3], f32, std::convert::Infallible>(
+        px,
+        strategy,
+        px.len() / 4 * 3,
+        |p| Ok(kernel(lut_pixel(p, lut))),
+        |out, rgb| out.extend_from_slice(&rgb),
+    );
+    match infallible {
+        Ok(done) => done,
+        Err(never) => match never {},
+    }
+}
+
+/// Probe, decide, then cache or go direct, shared by [`shade`] and [`shade_f32`]. `compute` maps
+/// one RGBA8 pixel to its value `V`, `push` appends it to the output. Only misses call `compute`;
+/// a hit's key was stored from a successful miss with the same bytes, so an error always surfaces
+/// on a miss.
+fn drive<V, T, E>(
+    px: &[u8],
+    strategy: Strategy,
+    capacity: usize,
+    compute: impl Fn(&[u8]) -> Result<V, E>,
+    push: impl Fn(&mut Vec<T>, V),
+) -> Result<(Vec<T>, MemoStats), E>
+where
+    V: Copy + Default,
+{
+    let mut out = Vec::with_capacity(capacity);
     let mut stats = MemoStats::default();
+    let direct = |px: &[u8], out: &mut Vec<T>| -> Result<(), E> {
+        for p in px.chunks_exact(4) {
+            push(out, compute(p)?);
+        }
+        Ok(())
+    };
+    let memoized = |px: &[u8], cache: &mut memo::Memo<V>, out: &mut Vec<T>| -> Result<usize, E> {
+        let mut hits = 0;
+        for p in px.chunks_exact(4) {
+            let key = memo::key(p[0], p[1], p[2]);
+            let value = if let Some(v) = cache.get(key) {
+                hits += 1;
+                v
+            } else {
+                let v = compute(p)?;
+                cache.insert(key, v);
+                v
+            };
+            push(out, value);
+        }
+        Ok(hits)
+    };
     match strategy {
-        Strategy::Direct => shade_direct(px, lut, &kernel, &mut out)?,
+        Strategy::Direct => direct(px, &mut out)?,
         Strategy::Memo => {
             let total = px.len() / 4;
             let (probe, rest) = px.split_at(total.min(memo::PROBE_PIXELS) * 4);
-            let mut cache = memo::ByteMemo::new();
-            stats.probe_hits = shade_memo(probe, lut, &kernel, &mut cache, &mut out)?;
+            let mut cache = memo::Memo::<V>::new();
+            stats.probe_hits = memoized(probe, &mut cache, &mut out)?;
             stats.fell_back = memo::falls_back(total, stats.probe_hits);
             if stats.fell_back {
                 drop(cache);
-                shade_direct(rest, lut, &kernel, &mut out)?;
+                direct(rest, &mut out)?;
             } else {
-                shade_memo(rest, lut, &kernel, &mut cache, &mut out)?;
+                memoized(rest, &mut cache, &mut out)?;
             }
         }
     }
@@ -336,44 +404,6 @@ fn finish(px: [f32; 3]) -> Result<[u8; 3], RenderError> {
     } else {
         Err(RenderError::NonFinite)
     }
-}
-
-fn shade_direct<K: Fn([f32; 3]) -> [f32; 3]>(
-    px: &[u8],
-    lut: &[[f32; 256]; 3],
-    kernel: &K,
-    out: &mut Vec<u8>,
-) -> Result<(), RenderError> {
-    for p in px.chunks_exact(4) {
-        let [r, g, b] = finish(kernel(lut_pixel(p, lut)))?;
-        out.extend_from_slice(&[r, g, b, 255]);
-    }
-    Ok(())
-}
-
-/// Memoized loop; returns the hit count. Only misses run `kernel` and [`finish`]: a hit's key was
-/// stored from a finite miss with the same bytes, so a non-finite pixel always surfaces on a miss.
-fn shade_memo<K: Fn([f32; 3]) -> [f32; 3]>(
-    px: &[u8],
-    lut: &[[f32; 256]; 3],
-    kernel: &K,
-    cache: &mut memo::ByteMemo,
-    out: &mut Vec<u8>,
-) -> Result<usize, RenderError> {
-    let mut hits = 0;
-    for p in px.chunks_exact(4) {
-        let key = memo::key(p[0], p[1], p[2]);
-        let [r, g, b] = if let Some(rgb) = cache.get(key) {
-            hits += 1;
-            rgb
-        } else {
-            let rgb = finish(kernel(lut_pixel(p, lut)))?;
-            cache.insert(key, rgb);
-            rgb
-        };
-        out.extend_from_slice(&[r, g, b, 255]);
-    }
-    Ok(hits)
 }
 
 #[cfg(test)]
@@ -963,10 +993,8 @@ mod tests {
         assert!(stats.fell_back, "{stats:?}");
     }
 
-    /// M2 (other branch): a large image with few colors keeps the memo past the probe.
-    #[test]
-    fn memo_keeps_cache_on_few_colors_and_stays_bit_identical() {
-        let (w, h) = (512u32, 512u32);
+    /// RGBA8 image cycling through 64 fixed colors (alpha 0): large but nearly all cache hits.
+    fn few_colors(w: u32, h: u32) -> Rgba8 {
         let palette = lcg_bytes(64 * 3, 7);
         let mut d = Vec::with_capacity((w * h * 4) as usize);
         for i in 0..(w * h) as usize {
@@ -974,8 +1002,62 @@ mod tests {
             d.extend_from_slice(&palette[c * 3..c * 3 + 3]);
             d.push(0);
         }
-        let stats = assert_memo_matches(&Rgba8::new(w, h, d).unwrap(), &global_max());
+        Rgba8::new(w, h, d).unwrap()
+    }
+
+    /// M2 (other branch): a large image with few colors keeps the memo past the probe.
+    #[test]
+    fn memo_keeps_cache_on_few_colors_and_stays_bit_identical() {
+        let stats = assert_memo_matches(&few_colors(512, 512), &global_max());
         assert!(!stats.fell_back, "{stats:?}");
+    }
+
+    /// F1: the f32 memo returns exactly the kernel output, cached or not, with or without fallback.
+    #[test]
+    fn f32_memo_matches_direct_bits() {
+        let r = norm(|r| r.hsl.saturation = [30.0; 8]);
+        let ops = GlobalOps::new(r.recipe());
+        let lut = linear_stage_lut(&r.recipe().basic);
+        for (img, falls) in [(noise(512, 512, 9), true), (few_colors(512, 512), false)] {
+            let (memo, stats) = shade_f32(
+                img.data(),
+                &lut,
+                |e| global_encoded(e, &ops),
+                Strategy::Memo,
+            );
+            let (direct, _) = shade_f32(
+                img.data(),
+                &lut,
+                |e| global_encoded(e, &ops),
+                Strategy::Direct,
+            );
+            assert_eq!(stats.fell_back, falls);
+            assert_eq!(
+                memo.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                direct.iter().map(|v| v.to_bits()).collect::<Vec<_>>()
+            );
+        }
+    }
+
+    /// F2: a NaN-producing kernel gives the same NaN bits on both strategies.
+    #[test]
+    fn f32_memo_keeps_nan_bits() {
+        let lut = linear_stage_lut(&Recipe::default().basic);
+        let bad = lut[0][77];
+        let kernel = |px: [f32; 3]| {
+            if px[0].to_bits() == bad.to_bits() {
+                [f32::NAN, px[1], px[2]]
+            } else {
+                px
+            }
+        };
+        let mut px = [10u8, 20, 30, 255].repeat(50);
+        px.extend_from_slice(&[77, 0, 0, 255, 77, 0, 0, 255]);
+        let bits = |v: Vec<f32>| v.into_iter().map(f32::to_bits).collect::<Vec<_>>();
+        assert_eq!(
+            bits(shade_f32(&px, &lut, kernel, Strategy::Memo).0),
+            bits(shade_f32(&px, &lut, kernel, Strategy::Direct).0)
+        );
     }
 
     /// M3: distinct keys that share one slot, interleaved so every visit evicts the previous one.
