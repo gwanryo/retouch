@@ -226,7 +226,7 @@ pub(crate) fn render_rgba8_f32(
 ///
 /// Bit-identical to `render(&ImageF32::from_rgba8(src), ..)?.to_rgba8()`, but faster: stages 1-3
 /// come from the LUT, recipes without stage-5 features run a stage-4-only loop, and pixels are
-/// memoized by their input bytes (see [`memo`] for why that is exact and when it stops being
+/// memoized by their input bytes (see `render/memo.rs` for why that is exact and when it stops being
 /// valid). Output alpha is 255, as `ImageF32::to_rgba8` writes it.
 pub fn render_rgba8(
     src: &Rgba8,
@@ -1013,7 +1013,14 @@ mod tests {
                 px
             }
         };
+        // Keep level 77 out of the probe so the error comes from the direct fallback loop.
         let mut late = noise(300, 300, 3).into_data();
+        for p in late.chunks_exact_mut(4).filter(|p| p[0] == 77) {
+            p[0] = 78;
+        }
+        let (_, stats) =
+            shade(&late, &lut, kernel, Strategy::Memo).expect("finite without level 77");
+        assert!(stats.fell_back);
         let n = late.len();
         late[n - 8] = 77;
         let mut repeated = [10u8, 20, 30, 255].repeat(100);
