@@ -28,6 +28,7 @@ pub mod basic;
 mod blur;
 mod clarity;
 mod curve;
+mod detail;
 mod grade;
 mod hsl;
 mod memo;
@@ -69,8 +70,7 @@ pub enum RenderError {
 /// pixels; Plan 1b's renderer must treat every inactive case as a no-op too. `crop` is never
 /// listed: render ignores it by contract (A10).
 pub fn unsupported_feature(r: &Recipe) -> Option<&'static str> {
-    let checks: [(&'static str, bool); 4] = [
-        ("detail.sharpen", r.detail.sharpen_amount != 0.0),
+    let checks: [(&'static str, bool); 3] = [
         ("detail.grain", r.detail.grain_amount != 0.0),
         ("detail.vignette", r.detail.vignette_amount != 0.0),
         ("masks", !r.masks.is_empty()),

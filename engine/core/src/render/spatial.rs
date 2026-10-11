@@ -2,18 +2,21 @@
 //! they run on the whole unquantized RGB buffer after the per-pixel stages 1-5.
 
 use super::clarity::LocalContrast;
+use super::detail::Sharpen;
 use crate::recipe::Recipe;
 
 /// Active spatial features, prepared once per render.
 pub(crate) struct SpatialOps {
     local: Option<LocalContrast>,
+    sharpen: Option<Sharpen>,
 }
 
 impl SpatialOps {
     /// `None` when every spatial feature is inactive (the per-pixel byte path then runs).
     pub(crate) fn new(r: &Recipe) -> Option<Self> {
         let local = LocalContrast::new(&r.basic);
-        local.is_some().then_some(Self { local })
+        let sharpen = Sharpen::new(&r.detail);
+        (local.is_some() || sharpen.is_some()).then_some(Self { local, sharpen })
     }
 
     /// Stage 6: global spatial features (texture, clarity).
@@ -23,12 +26,12 @@ impl SpatialOps {
         }
     }
 
-    /// Detail stages after the global ones (split 4 stage 7 goes between, R5). Empty for now.
-    #[expect(
-        clippy::unused_self,
-        reason = "sharpening and grain read self (Tasks 5-6)"
-    )]
+    /// Detail stages after the global ones (split 4 stage 7 goes between, R5): sharpening (8a).
+    /// Grain (8c) joins in Task 6.
     pub(crate) fn apply_detail(&self, rgb: &mut [f32], width: usize, height: usize, seed: u32) {
-        let _ = (rgb, width, height, seed);
+        let _ = seed;
+        if let Some(sharpen) = &self.sharpen {
+            sharpen.apply(rgb, width, height);
+        }
     }
 }

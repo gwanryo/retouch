@@ -82,10 +82,6 @@ pub(crate) fn box_blur3(src: &Plane, radius: usize) -> Plane {
 }
 
 /// Normalized Gaussian kernel of half-width `ceil(3 * sigma)` (length `2R + 1`).
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "consumed by sharpening (Task 5)")
-)]
 pub(crate) fn gaussian_kernel(sigma: f32) -> Vec<f32> {
     let r = (3.0 * sigma).ceil() as isize;
     let w: Vec<f32> = (-r..=r)
@@ -112,10 +108,6 @@ fn gaussian_pass(line: &[f32], out: &mut [f32], kernel: &[f32]) {
 }
 
 /// Separable Gaussian blur: horizontal then vertical.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "consumed by sharpening (Task 5)")
-)]
 pub(crate) fn gaussian_blur(src: &Plane, kernel: &[f32]) -> Plane {
     let mut p = src.clone();
     separable(&mut p, &|line, out| gaussian_pass(line, out, kernel));
