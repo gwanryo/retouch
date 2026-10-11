@@ -1,0 +1,3 @@
+{ "schema_version": 1, "basic": { "contrast": 5 },
+  "color_grade": { "shadows": { "hue": 220, "sat": 20, "lum": -5 }, "midtones": { "hue": 30, "sat": 8, "lum": 2 }, "highlights": { "hue": 45, "sat": 18, "lum": 2 }, "global": { "hue": 200, "sat": 2, "lum": 0 }, "blending": 60, "balance": -20 },
+  "split_toning": { "shadow_hue": 180, "shadow_sat": 10, "highlight_hue": 30, "highlight_sat": 12, "balance": 10 } }

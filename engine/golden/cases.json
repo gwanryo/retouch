@@ -20,7 +20,14 @@
     { "name": "flowers_cool", "image": "flowers", "answer": "recipes/cool_fade.json", "seed": 3, "eligible": true,
       "players": { "half": { "recipe": "recipes/player_cool_half.json", "score": [1, 99] } } },
     { "name": "portrait_bright", "image": "portrait", "answer": "recipes/exposure_plus1.json", "seed": 4, "eligible": true,
-      "players": { "half": { "recipe": "recipes/player_exposure_half.json", "score": [1, 99] } } }
+      "players": { "half": { "recipe": "recipes/player_exposure_half.json", "score": [1, 99] } } },
+    { "name": "flowers_hsl_curve", "image": "flowers", "answer": "recipes/hsl_curve.json", "seed": 5, "eligible": true,
+      "players": { "half": { "recipe": "recipes/player_hsl_curve_half.json", "score": [1, 99] } } },
+    { "name": "lake_grade_split", "image": "lake", "answer": "recipes/grade_split.json", "seed": 6, "eligible": true,
+      "players": {
+        "half": { "recipe": "recipes/player_grade_split_half.json", "score": [1, 99] },
+        "max": { "recipe": "recipes/player_global_max.json", "score": [0, 99] }
+      } }
   ],
   "probes": [
     { "name": "perfect_300x200", "width": 300, "height": 200, "shift": 40, "noise": 1, "score": [100, 100] },

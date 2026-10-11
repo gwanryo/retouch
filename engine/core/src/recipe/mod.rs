@@ -33,8 +33,8 @@ pub enum RecipeError {
         /// Points given.
         count: usize,
     },
-    /// Curve x values not strictly increasing.
-    #[error("tone_curve.{channel}[{index}] x is not greater than the previous point")]
+    /// Curve x values not increasing by at least one 8-bit level.
+    #[error("tone_curve.{channel}[{index}] x must exceed the previous point's x by at least 1")]
     CurveNotIncreasing {
         /// Curve name.
         channel: &'static str,
@@ -349,6 +349,28 @@ mod tests {
                     index: 2
                 }
             );
+        }
+
+        #[test]
+        fn rejects_curve_points_closer_than_one_level() {
+            let e = err(
+                r#"{"schema_version":1,"tone_curve":{"green":[[0,0],[10,5],[10.5,6],[255,255]]}}"#,
+            );
+            assert_eq!(
+                e,
+                RecipeError::CurveNotIncreasing {
+                    channel: "green",
+                    index: 2
+                }
+            );
+        }
+
+        #[test]
+        fn accepts_curve_points_exactly_one_level_apart() {
+            assert!(Recipe::from_json(
+                r#"{"schema_version":1,"tone_curve":{"master":[[0,0],[1,255],[255,255]]}}"#
+            )
+            .is_ok());
         }
 
         #[test]

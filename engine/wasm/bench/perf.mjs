@@ -8,6 +8,9 @@
 //     --input engine/golden/images/lake_2048x1365_baseline420.jpg \
 //     --recipe engine/golden/recipes/warm_contrast.json --seed 0 --out-dir engine/target/perf
 //   node engine/wasm/bench/perf.mjs
+// Max global-color player (answer from grade_split.json via --out-dir engine/target/perf-color):
+//   node engine/wasm/bench/perf.mjs --answer target/perf-color/answer_2048.png \
+//     --player golden/recipes/player_global_max.json
 import { existsSync, readFileSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -18,18 +21,29 @@ const here = dirname(fileURLToPath(import.meta.url))
 const engine = resolve(here, '../..')
 const wasm = await import(pathToFileURL(resolve(here, '../pkg/engine_wasm.js')).href)
 const read = (p) => new Uint8Array(readFileSync(resolve(engine, p)))
-const answerPng = 'target/perf/answer_2048.png'
+// Options (paths relative to engine/): --answer <png> (default target/perf/answer_2048.png),
+// --player <recipe.json> (default golden/recipes/player_warm_near.json).
+const option = (name, fallback) => {
+  const i = process.argv.indexOf(name)
+  if (i === -1) return fallback
+  const v = process.argv[i + 1]
+  if (!v || v.startsWith('--')) throw new Error(`${name} needs a value`)
+  return v
+}
+const answerPng = option('--answer', 'target/perf/answer_2048.png')
+const playerRecipe = option('--player', 'golden/recipes/player_warm_near.json')
 if (!existsSync(resolve(engine, answerPng))) throw new Error(`engine/${answerPng} missing: run engine-cli gen-answer first (see header)`)
 const MiB = (bytes) => (bytes / 2 ** 20).toFixed(1)
 
 const inputs = {
   jpeg: read('golden/images/lake_2048x1365_baseline420.jpg'),
   answerPng: read(answerPng),
-  playerRecipe: readFileSync(resolve(engine, 'golden/recipes/player_warm_near.json'), 'utf8'),
+  playerRecipe: readFileSync(resolve(engine, playerRecipe), 'utf8'),
   regionJson: '{"kind":"full"}',
   seed: 0,
   compositionJson: null,
 }
+console.log(`inputs: answer engine/${answerPng}, player engine/${playerRecipe}`)
 const r = await runGate(wasm, inputs, {
   now: () => performance.now(),
   wasmSha256: wasm.sha256_hex(read('wasm/pkg/engine_wasm_bg.wasm')),

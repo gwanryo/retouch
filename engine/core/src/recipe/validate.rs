@@ -8,6 +8,9 @@ use super::{Normalization, RecipeError};
 
 pub(super) const MAX_MASKS: usize = 3;
 pub(super) const MAX_CURVE_POINTS: usize = 16;
+/// Minimum x distance between neighboring curve points (one 8-bit level). Closer points would
+/// make the Hermite slopes overflow f32 (AC-E3c).
+pub(super) const MIN_CURVE_X_STEP: f32 = 1.0;
 pub(super) const MIN_CROP_AREA: f32 = 0.25;
 
 struct Clamper {
@@ -73,7 +76,10 @@ impl Clamper {
             self.field(format!("tone_curve.{name}[{i}][0]"), &mut p[0], 0.0, 255.0)?;
             self.field(format!("tone_curve.{name}[{i}][1]"), &mut p[1], 0.0, 255.0)?;
         }
-        if let Some(i) = pts.windows(2).position(|w| w[1][0] <= w[0][0]) {
+        if let Some(i) = pts
+            .windows(2)
+            .position(|w| w[1][0] - w[0][0] < MIN_CURVE_X_STEP)
+        {
             return Err(RecipeError::CurveNotIncreasing {
                 channel: name,
                 index: i + 1,

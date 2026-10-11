@@ -10,7 +10,8 @@ pub fn luma(px: [f32; 3]) -> f32 {
     0.2126 * px[0] + 0.7152 * px[1] + 0.0722 * px[2]
 }
 
-fn smoothstep(e0: f32, e1: f32, x: f32) -> f32 {
+/// Hermite smoothstep of `x` between `e0 < e1`, clamped to [0, 1] (a weight, never a sample).
+pub(crate) fn smoothstep(e0: f32, e1: f32, x: f32) -> f32 {
     let t = ((x - e0) / (e1 - e0)).clamp(0.0, 1.0);
     t * t * (3.0 - 2.0 * t)
 }
