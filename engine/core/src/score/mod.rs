@@ -785,15 +785,37 @@ mod tests {
         Rgba8::new(w, h, data).unwrap()
     }
 
-    /// More distinct colors and pairs than slots: memo slots are overwritten and revisited, and
-    /// every value still equals the uncached one.
+    /// Same key hits without recomputing; a colliding key evicts it, and the evicted key is
+    /// recomputed (A -> B -> A on one memo).
+    #[test]
+    fn direct_memo_evicts_on_collision_and_recomputes() {
+        let mut memo = DirectMemo::new(1, 0u64); // 2 slots
+        let slot = |k: u64| (k | DirectMemo::<u64>::TAG).wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 63;
+        let a = 1u64;
+        let b = (2u64..1000).find(|&k| slot(k) == slot(a)).unwrap();
+        let mut calls = 0;
+        let mut get = |m: &mut DirectMemo<u64>, k: u64| {
+            m.get_or(k, || {
+                calls += 1;
+                k * 10
+            })
+        };
+        assert_eq!(get(&mut memo, a), 10);
+        assert_eq!(get(&mut memo, a), 10); // hit
+        assert_eq!(get(&mut memo, b), b * 10); // evicts a
+        assert_eq!(get(&mut memo, a), 10); // recomputed
+        assert_eq!(calls, 3);
+    }
+
+    /// More distinct colors and pairs than slots, so memo slots are overwritten, and every value
+    /// still equals the uncached one. Each combination uses a fresh pair memo.
     #[test]
     fn direct_mapped_memos_match_naive_when_slots_collide() {
-        // 2^18 pixels: twice the color memo's slots, half the pair memo's; colors repeat 4x
+        // 2^18 distinct colors per image: twice the color memo's slots, half the pair memo's
         let a = distinct_image(512, 512, 0x9E37_79B1);
         let b = palette_image(512, 512, &PALETTE, |i| i / 7);
         let mut a4 = a.data().to_vec();
-        a4.rotate_left(4 * 65_536); // the same colors again at other positions
+        a4.rotate_left(4 * 65_536); // the same colors at other positions, so pairs differ
         let a2 = Rgba8::new(512, 512, a4).unwrap();
         for (x, y) in [(&a, &b), (&a2, &a), (&b, &a2)] {
             let (lx, ly) = (lab_image(x), lab_image(y));

@@ -9,12 +9,13 @@
 //!    (`curve`), (b) HSL 8 bands (`hsl`), (c) color grading (`grade`), (d) split toning
 //!    (`grade`). Inactive features are skipped, so recipes that do not use them render
 //!    bit-identically to Plan 1a.
-//! 6. texture and clarity (`clarity`): local contrast on the whole buffer.
-//! 7. [split 4: range-mask eval, mask composite]. The composite goes between
+//! 6. texture and clarity (`clarity`): local contrast on the whole buffer. Both read the luma
+//!    of the stage-5 output.
+//! 7. [split 4, planned: range-mask eval, mask composite]. The composite goes between
 //!    `SpatialOps::apply_global` and `SpatialOps::apply_detail`. Range masks are evaluated on
-//!    the original `src`, not on the corrected pixels. Per-mask clarity lives inside stage 7
-//!    (based on the stage-6 output, like the global clarity); per-mask sharpening attaches to
-//!    stage 8a as a per-pixel amount.
+//!    the original `src`, not on the corrected pixels. Per-mask clarity lives inside stage 7 and
+//!    reads the stage-6 output (after global texture and clarity); per-mask sharpening attaches
+//!    to stage 8a as a per-pixel amount.
 //! 8. detail (`detail`): (a) sharpening, (b) vignette, (c) grain.
 //! 9. finiteness check. Clamping happens only in `buffer::quantize` (A3 point ①).
 //!
@@ -1343,9 +1344,12 @@ mod tests {
                         r.hsl.saturation = [25.0; 8];
                     }
                 });
-                if SpatialOps::new(r.recipe()).is_none() {
-                    continue; // dehaze alone: byte path, Task 2
+                if mask == 1 << 2 {
+                    // dehaze alone: byte path, Task 2
+                    assert!(SpatialOps::new(r.recipe()).is_none());
+                    continue;
                 }
+                assert!(SpatialOps::new(r.recipe()).is_some(), "mask {mask:#08b}");
                 for src in &images {
                     assert_paths_match(src, &r, RenderContext { seed: 9 });
                 }
