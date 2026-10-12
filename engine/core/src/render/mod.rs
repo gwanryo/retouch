@@ -3,14 +3,26 @@
 //! 1. encoded → linear (`srgb_decode`, unclamped)
 //! 2. linear stage: exposure, white balance
 //! 3. linear → encoded (`srgb_encode`, unclamped)
-//! 4. encoded stage: contrast/highlights/shadows/whites/blacks, then vibrance/saturation
+//! 4. (a) dehaze, then the encoded stage: contrast/highlights/shadows/whites/blacks, then
+//!    vibrance/saturation. Dehaze runs before basic tone, not after.
 //! 5. global color, per pixel on encoded values: (a) tone curve, master then per channel
 //!    (`curve`), (b) HSL 8 bands (`hsl`), (c) color grading (`grade`), (d) split toning
 //!    (`grade`). Inactive features are skipped, so recipes that do not use them render
 //!    bit-identically to Plan 1a.
-//! 6. [Plan 1b later splits: range-mask eval on the ORIGINAL linear pixel, mask composite,
-//!    detail]
-//! 7. finiteness check. Clamping happens only in `buffer::quantize` (A3 point ①).
+//! 6. texture and clarity (`clarity`): local contrast on the whole buffer.
+//! 7. [split 4: range-mask eval, mask composite]. The composite goes between
+//!    `SpatialOps::apply_global` and `SpatialOps::apply_detail`. Range masks are evaluated on
+//!    the original `src`, not on the corrected pixels. Per-mask clarity lives inside stage 7
+//!    (based on the stage-6 output, like the global clarity); per-mask sharpening attaches to
+//!    stage 8a as a per-pixel amount.
+//! 8. detail (`detail`): (a) sharpening, (b) vignette, (c) grain.
+//! 9. finiteness check. Clamping happens only in `buffer::quantize` (A3 point ①).
+//!
+//! When a spatial feature (texture, clarity, sharpen, vignette, grain) is active,
+//! [`render_rgba8`] fills an f32 buffer with stages 1-5 (LUT and memo) and runs
+//! `SpatialOps::apply_global` and `SpatialOps::apply_detail` on it, the same functions the
+//! general path uses. Blurs run in row order and vignette/grain use per-column and per-row
+//! tables, bit-identical to their definitions. When none is active, the byte-cache path runs.
 //!
 //! Input and output are encoded-sRGB `ImageF32` of the SAME size, always (master plan A10):
 //! the recipe's `crop` is never applied here. Cropping is a separate display operation
@@ -1275,5 +1287,246 @@ mod tests {
                     .to_rgba8()
             );
         }
+    }
+
+    fn detail_features() -> [fn(&mut Recipe); 6] {
+        [
+            |r| r.basic.texture = 45.0,
+            |r| r.basic.clarity = -55.0,
+            |r| r.basic.dehaze = 35.0,
+            |r| {
+                r.detail.sharpen_amount = 120.0;
+                r.detail.sharpen_radius = 2.2;
+                r.detail.sharpen_masking = 40.0;
+            },
+            |r| {
+                r.detail.vignette_amount = -60.0;
+                r.detail.vignette_feather = 20.0;
+            },
+            |r| {
+                r.detail.grain_amount = 70.0;
+                r.detail.grain_size = 60.0;
+                r.detail.grain_frequency = 80.0;
+            },
+        ]
+    }
+
+    fn bits(v: &[f32]) -> Vec<u32> {
+        v.iter().map(|x| x.to_bits()).collect()
+    }
+
+    /// Pre-quantization fast buffer and reference samples, compared bit for bit, plus final bytes.
+    fn assert_paths_match(src: &Rgba8, r: &Normalized, ctx: RenderContext) -> MemoStats {
+        let reference = render(&ImageF32::from_rgba8(src), r, &ctx).unwrap();
+        let sp = SpatialOps::new(r.recipe()).unwrap();
+        let (fast, stats) = spatial_samples(src, r.recipe(), &sp, ctx.seed, Strategy::Memo);
+        assert_eq!(bits(&fast), bits(reference.samples()));
+        assert_eq!(render_rgba8(src, r, &ctx).unwrap(), reference.to_rgba8());
+        stats
+    }
+
+    /// I1a: every subset of the 6 detail features that has a spatial stage, with and without
+    /// stage-5 color, on small images (R10: the full matrix stays cheap).
+    #[test]
+    fn detail_paths_are_bit_identical_for_every_feature_subset() {
+        let images = [all_levels(), noise(40, 30, 21)];
+        let feats = detail_features();
+        for mask in 1u32..64 {
+            for color in [false, true] {
+                let r = norm(|r| {
+                    for (i, f) in feats.iter().enumerate() {
+                        if (mask >> i) & 1 == 1 {
+                            f(r);
+                        }
+                    }
+                    if color {
+                        r.hsl.saturation = [25.0; 8];
+                    }
+                });
+                if SpatialOps::new(r.recipe()).is_none() {
+                    continue; // dehaze alone: byte path, Task 2
+                }
+                for src in &images {
+                    assert_paths_match(src, &r, RenderContext { seed: 9 });
+                }
+            }
+        }
+    }
+
+    /// I1b: all features on images past the memo probe, one that falls back and one that keeps
+    /// the cache.
+    #[test]
+    fn detail_paths_are_bit_identical_past_the_probe() {
+        let all = norm(|r| {
+            for f in detail_features() {
+                f(r);
+            }
+            r.hsl.saturation = [25.0; 8];
+        });
+        let ctx = RenderContext { seed: 9 };
+        assert!(assert_paths_match(&noise(300, 300, 21), &all, ctx).fell_back);
+        assert!(!assert_paths_match(&few_colors(300, 300), &all, ctx).fell_back);
+    }
+
+    /// I5 (R4): the spatial stages compose in the fixed order, checked against the components
+    /// applied by hand on the stage-5 output; the swapped order gives different bits, so the
+    /// fixture can tell.
+    #[test]
+    fn spatial_order_is_local_contrast_sharpen_vignette_grain() {
+        let src = noise(48, 40, 5);
+        let (w, h, seed) = (48usize, 40usize, 3u32);
+        let full = norm(|r| {
+            for f in detail_features() {
+                f(r);
+            }
+            r.hsl.saturation = [25.0; 8];
+        });
+        let rec = full.recipe();
+        // same non-spatial fields: dehaze + stage-5 HSL
+        let base = norm(|r| {
+            detail_features()[2](r);
+            r.hsl.saturation = [25.0; 8];
+        });
+        let stage5 = render(&ImageF32::from_rgba8(&src), &base, &CTX)
+            .unwrap()
+            .into_samples();
+        let lc = clarity::LocalContrast::new(&rec.basic).unwrap();
+        let sh = detail::Sharpen::new(&rec.detail).unwrap();
+        let vg = detail::Vignette::new(&rec.detail).unwrap();
+        let gr = detail::Grain::new(&rec.detail).unwrap();
+        let finish_px = |rgb: &mut Vec<f32>| {
+            for y in 0..h {
+                for x in 0..w {
+                    let i = (y * w + x) * 3;
+                    let px = vg.apply_px([rgb[i], rgb[i + 1], rgb[i + 2]], vg.weight(x, y, w, h));
+                    rgb[i..i + 3].copy_from_slice(&gr.apply_px(px, gr.noise(seed, x, y)));
+                }
+            }
+        };
+        let mut expected = stage5.clone();
+        lc.apply(&mut expected, w, h);
+        sh.apply(&mut expected, w, h);
+        finish_px(&mut expected);
+        let got = render(&ImageF32::from_rgba8(&src), &full, &RenderContext { seed }).unwrap();
+        assert_eq!(bits(got.samples()), bits(&expected));
+        let mut swapped = stage5;
+        sh.apply(&mut swapped, w, h);
+        lc.apply(&mut swapped, w, h);
+        finish_px(&mut swapped);
+        assert_ne!(bits(&swapped), bits(&expected));
+    }
+
+    /// I6 (R4): dehaze runs before basic tone (stage 4a), not after.
+    #[test]
+    fn dehaze_runs_before_basic_tone() {
+        let r = norm(|r| {
+            r.basic.dehaze = 60.0;
+            r.basic.contrast = 50.0;
+            r.basic.shadows = 40.0;
+        });
+        let ops = GlobalOps::new(r.recipe());
+        let b = &r.recipe().basic;
+        let tone = |p| {
+            basic::apply_color_encoded(basic::apply_tone_encoded(p, b), b.vibrance, b.saturation)
+        };
+        for px in [[0.7, 0.6, 0.5], [0.2, 0.25, 0.3], [1.3, 0.9, 0.8]] {
+            let expected = tone(basic::apply_dehaze_encoded(px, 0.6));
+            assert_eq!(
+                global_encoded(px, &ops).map(f32::to_bits),
+                expected.map(f32::to_bits)
+            );
+            assert_ne!(
+                basic::apply_dehaze_encoded(tone(px), 0.6).map(f32::to_bits),
+                expected.map(f32::to_bits)
+            );
+        }
+    }
+
+    /// I2: extremes stay finite (AC-E3c).
+    #[test]
+    fn extreme_detail_values_stay_finite() {
+        let src = all_levels();
+        for ev in [-5.0, 0.0, 5.0] {
+            for s in [-1.0f32, 1.0] {
+                let r = norm(|r| {
+                    r.basic.exposure = ev;
+                    r.basic.texture = 100.0 * s;
+                    r.basic.clarity = 100.0 * s;
+                    r.basic.dehaze = 100.0 * s;
+                    r.detail.sharpen_amount = 150.0;
+                    r.detail.sharpen_radius = 3.0;
+                    r.detail.sharpen_detail = 0.0;
+                    r.detail.sharpen_masking = 100.0;
+                    r.detail.grain_amount = 100.0;
+                    r.detail.grain_size = 0.0;
+                    r.detail.grain_frequency = 100.0;
+                    r.detail.vignette_amount = 100.0 * s;
+                    r.detail.vignette_midpoint = 0.0;
+                    r.detail.vignette_feather = 0.0;
+                });
+                assert!(render(&ImageF32::from_rgba8(&src), &r, &CTX)
+                    .unwrap()
+                    .samples()
+                    .iter()
+                    .all(|v| v.is_finite()));
+                assert!(render_rgba8(&src, &r, &CTX).is_ok());
+            }
+        }
+        // black, white, mid gray, with subnormal masking (R1), on both paths
+        for v in [0u8, 255, 128] {
+            let flat = Rgba8::new(32, 24, [v, v, v, 255].repeat(32 * 24)).unwrap();
+            let r = norm(|r| {
+                r.detail.sharpen_amount = 150.0;
+                r.detail.sharpen_masking = 1e-44;
+                r.basic.clarity = 100.0;
+                r.basic.dehaze = 100.0;
+                r.detail.grain_amount = 100.0;
+            });
+            assert!(render(&ImageF32::from_rgba8(&flat), &r, &CTX)
+                .unwrap()
+                .samples()
+                .iter()
+                .all(|x| x.is_finite()));
+            assert!(render_rgba8(&flat, &r, &CTX).is_ok());
+        }
+    }
+
+    /// I3: images smaller than every blur radius.
+    #[test]
+    fn tiny_images_render_on_both_paths() {
+        let all = norm(|r| {
+            for f in detail_features() {
+                f(r);
+            }
+        });
+        for (w, h) in [(1, 1), (3, 1), (1, 3), (5, 5)] {
+            let src = noise(w, h, 3);
+            assert_eq!(
+                render_rgba8(&src, &all, &CTX).unwrap(),
+                render(&ImageF32::from_rgba8(&src), &all, &CTX)
+                    .unwrap()
+                    .to_rgba8(),
+                "{w}x{h}"
+            );
+        }
+    }
+
+    /// I4: inactive detail fields alone never change pixels (seam), on the byte path.
+    #[test]
+    fn inactive_detail_fields_are_bitwise_noops() {
+        let src = all_levels();
+        let r = norm(|r| {
+            r.detail.sharpen_radius = 3.0;
+            r.detail.sharpen_detail = 0.0;
+            r.detail.sharpen_masking = 100.0;
+            r.detail.grain_size = 100.0;
+            r.detail.grain_frequency = 0.0;
+            r.detail.vignette_midpoint = 0.0;
+            r.detail.vignette_feather = 100.0;
+        });
+        assert_eq!(
+            render_rgba8(&src, &r, &RenderContext { seed: 77 }).unwrap(),
+            render_rgba8(&src, &norm(|_| {}), &CTX).unwrap()
+        );
     }
 }
