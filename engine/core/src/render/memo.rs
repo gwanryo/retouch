@@ -3,11 +3,11 @@
 //! On 8-bit input, stages 1-5 are a pure function of a pixel's three bytes `(r, g, b)`: stages
 //! 1-3 are a per-channel LUT and stages 4-5 are per-pixel arithmetic with no position, seed or
 //! neighbour input. Equal bytes therefore give equal output bytes, and a cache keyed on the bytes
-//! returns exactly what recomputing would. Only misses run the stages, the finiteness check and
-//! `buffer::quantize`, so the first non-finite pixel is always met on a miss.
+//! returns exactly what recomputing would. On the byte path only misses run the stages, the
+//! finiteness check and `buffer::quantize`, so the first non-finite pixel is always met on a miss.
 //!
-//! The f32 cache holds the stage 1-5 output and spatial stages run behind it on every pixel
-//! (Plan 1b-3). The byte cache is only valid while nothing after stage 5 needs position or
+//! The f32 cache holds the stage 1-5 output; the spatial stages, the finiteness check and
+//! `finish` then run on every output pixel (Plan 1b-3). The byte cache is only valid while nothing after stage 5 needs position or
 //! neighbours.
 
 /// log2 of the slot count. 2^18 slots (8 bytes per byte slot = 2 MiB, 16 per f32 slot = 4 MiB), allocated per render call.

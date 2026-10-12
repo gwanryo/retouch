@@ -259,7 +259,7 @@ pub(crate) fn render_rgba8_f32(
 /// (master plan A3 point ①). This is what the answer PNG stores.
 ///
 /// Bit-identical to `render(&ImageF32::from_rgba8(src), ..)?.to_rgba8()`, but faster: stages 1-3
-/// come from the LUT, recipes without stage-5 features run a stage-4-only loop, and pixels are
+/// come from the LUT, recipes with neither dehaze nor stage-5 features run a basic-only loop, and pixels are
 /// memoized by their input bytes (see `render/memo.rs` for why that is exact and when it stops being
 /// valid). Output alpha is 255, as `ImageF32::to_rgba8` writes it.
 pub fn render_rgba8(
