@@ -190,7 +190,7 @@ pub(crate) fn delta_e00_with_chroma(c1: Lab, c1ab: f64, c2: Lab, c2ab: f64) -> f
 }
 
 // `hypot_hw` is a copy of `hypot` from the `libm` crate 0.2.16 (src/math/hypot.rs,
-// https://github.com/rust-lang/libm), itself a port of musl libc's src/math/hypot.c. The only
+// https://crates.io/crates/libm/0.2.16, now maintained in rust-lang/compiler-builtins), itself a port of musl libc's src/math/hypot.c. The only
 // change is the final square root: the hardware `f64::sqrt` (IEEE 754 correctly rounded, so the
 // same bits as libm's software `sqrt`) instead of libm's software `sqrt`.
 //

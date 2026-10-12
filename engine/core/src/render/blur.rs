@@ -422,12 +422,13 @@ mod tests {
     }
 
     /// Shapes covering 1x1, single rows/columns, non-square planes and radii above the size.
-    const SHAPES: [(usize, usize); 9] = [
+    const SHAPES: [(usize, usize); 10] = [
         (1, 1),
         (5, 1),
         (1, 5),
         (2, 3),
         (5, 5),
+        (10, 10),
         (17, 9),
         (9, 50),
         (64, 40),

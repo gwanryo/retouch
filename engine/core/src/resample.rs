@@ -580,7 +580,7 @@ mod tests {
                     .collect();
                 handles
                     .into_iter()
-                    .map(|h| h.join().unwrap_or(u64::MAX))
+                    .map(|h| h.join().expect("worker panicked"))
                     .sum()
             });
             assert_eq!(bad, 0);
