@@ -27,7 +27,14 @@
       "players": {
         "half": { "recipe": "recipes/player_grade_split_half.json", "score": [1, 99] },
         "max": { "recipe": "recipes/player_global_max.json", "score": [0, 99] }
-      } }
+      } },
+    { "name": "lake_detail", "image": "lake", "answer": "recipes/detail_mix.json", "seed": 7, "eligible": true,
+      "players": {
+        "half": { "recipe": "recipes/player_detail_half.json", "score": [1, 99] },
+        "max": { "recipe": "recipes/player_detail_max.json", "score": [0, 99] }
+      } },
+    { "name": "portrait_dehaze_vignette", "image": "portrait", "answer": "recipes/dehaze_vignette.json", "seed": 8, "eligible": true,
+      "players": { "half": { "recipe": "recipes/player_dehaze_vignette_half.json", "score": [1, 99] } } }
   ],
   "probes": [
     { "name": "perfect_300x200", "width": 300, "height": 200, "shift": 40, "noise": 1, "score": [100, 100] },

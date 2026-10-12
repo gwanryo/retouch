@@ -14,8 +14,9 @@ repository = "https://github.com/gwanryo/retouch"
 engine-core = { path = "core" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-# `arch` swaps in hardware sqrt/fma/rint. Those are IEEE-exact too, but we keep every target on
-# the same pure-Rust code path (master plan §5.1).
+# `arch` swaps in hardware sqrt/fma/rint. Those are IEEE-exact too, but we keep libm itself on
+# the same pure-Rust code path on every target (master plan §5.1). Our own code may still call
+# `f64::sqrt` directly (correctly rounded, same bits), e.g. scoring's `delta_e00`/`hypot_hw`.
 libm = { version = "=0.2.16", default-features = false, features = ["force-soft-floats"] }
 sha2 = "0.10"
 thiserror = "2"

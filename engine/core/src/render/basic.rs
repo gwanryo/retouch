@@ -74,6 +74,31 @@ pub fn apply_color_encoded(px: [f32; 3], vibrance: f32, saturation: f32) -> [f32
     px.map(|x| y + (x - y) * k)
 }
 
+/// Dehaze strength: at `amount = 1` a pixel with dark channel 1 loses `a = 0.5` of haze.
+pub const DEHAZE_STRENGTH: f32 = 0.5;
+/// Haze (atmospheric light) level that negative dehaze mixes toward.
+pub const HAZE_LEVEL: f32 = 0.85;
+/// Haze fraction mixed in at `amount = -1`.
+pub const HAZE_ADD: f32 = 0.4;
+
+/// Encoded stage (4a): dehaze by the haze model `I = J·t + (1 - t)` with atmospheric light 1.
+/// `amount = dehaze / 100` is never 0 here (callers skip that case). Positive: the haze part
+/// `a = 1 - t = DEHAZE_STRENGTH·amount·dc` is proportional to the pixel's one-pixel dark channel
+/// `dc = clamp(min(r, g, b), 0, 1)`, and each channel becomes `(x - a) / (1 - a)`; the divisor
+/// `1 - a >= 0.5` never nears zero, white stays white. Negative: `a = HAZE_ADD·(-amount)` mixes
+/// each channel toward `HAZE_LEVEL`, `x + a·(HAZE_LEVEL - x)`. Nothing else is clamped (A3).
+pub fn apply_dehaze_encoded(px: [f32; 3], amount: f32) -> [f32; 3] {
+    if amount > 0.0 {
+        let dc = px[0].min(px[1]).min(px[2]).clamp(0.0, 1.0);
+        let a = DEHAZE_STRENGTH * amount * dc;
+        let inv = 1.0 - a;
+        px.map(|x| (x - a) / inv)
+    } else {
+        let a = HAZE_ADD * -amount;
+        px.map(|x| x + a * (HAZE_LEVEL - x))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -184,5 +209,49 @@ mod tests {
             gain_dull > gain_vivid,
             "dull {gain_dull} vivid {gain_vivid}"
         );
+    }
+
+    #[test]
+    fn dehaze_plus_100_darkens_hazy_gray_by_the_model() {
+        let out = apply_dehaze_encoded([0.8; 3], 1.0); // a = 0.4, (0.8-0.4)/0.6
+        assert!(
+            out.iter().all(|&v| (v - 0.666_666_7).abs() < 1e-6),
+            "{out:?}"
+        );
+    }
+
+    #[test]
+    fn dehaze_keeps_white_and_fully_saturated_pixels() {
+        assert_eq!(apply_dehaze_encoded([1.0; 3], 1.0), [1.0; 3]);
+        assert_eq!(apply_dehaze_encoded([1.0, 0.0, 0.0], 0.7), [1.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn dehaze_plus_raises_chroma_of_a_muted_color() {
+        let px = [0.7, 0.6, 0.5];
+        let out = apply_dehaze_encoded(px, 0.5);
+        assert!(out[0] - out[2] > px[0] - px[2], "{out:?}");
+    }
+
+    #[test]
+    fn dehaze_minus_100_lifts_black_to_the_haze_mix() {
+        let out = apply_dehaze_encoded([0.0; 3], -1.0); // 0 + 0.4·0.85
+        assert!(out.iter().all(|&v| (v - 0.34).abs() < 1e-6), "{out:?}");
+    }
+
+    #[test]
+    fn dehaze_minus_lowers_contrast() {
+        let dark = apply_dehaze_encoded([0.2; 3], -0.5)[0];
+        let bright = apply_dehaze_encoded([0.9; 3], -0.5)[0];
+        assert!(bright - dark < 0.7);
+    }
+
+    #[test]
+    fn dehaze_stays_finite_outside_unit_range() {
+        for px in [[1.6, 1.5, 1.4], [-0.3, 0.1, 2.0], [0.0; 3]] {
+            for a in [-1.0, -0.01, 0.01, 1.0] {
+                assert!(apply_dehaze_encoded(px, a).iter().all(|v| v.is_finite()));
+            }
+        }
     }
 }

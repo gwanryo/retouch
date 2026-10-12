@@ -1,0 +1,5 @@
+{ "schema_version": 1,
+  "basic": { "exposure": 0.2, "contrast": 20, "texture": 60, "clarity": 70, "dehaze": 40 },
+  "detail": { "sharpen_amount": 150, "sharpen_radius": 3.0, "sharpen_detail": 10, "sharpen_masking": 50,
+              "grain_amount": 80, "grain_size": 100, "grain_frequency": 100,
+              "vignette_amount": -80, "vignette_midpoint": 20, "vignette_feather": 80 } }

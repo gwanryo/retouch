@@ -11,6 +11,7 @@
 
 use crate::buffer::{dequantize, quantize, BufferError, ImageF32, Rgba8};
 use crate::color::{srgb_decode, srgb_encode};
+use std::sync::OnceLock;
 use thiserror::Error;
 
 /// Errors from resampling.
@@ -209,14 +210,86 @@ pub fn scoring_image(src: &Rgba8, long_edge: u32) -> Result<Rgba8, ResampleError
         .pixels()
         .flat_map(|p| {
             [
-                quantize(srgb_encode(p[0])),
-                quantize(srgb_encode(p[1])),
-                quantize(srgb_encode(p[2])),
+                encode_quantize(p[0]),
+                encode_quantize(p[1]),
+                encode_quantize(p[2]),
                 255,
             ]
         })
         .collect();
     Ok(Rgba8::new(dw, dh, bytes)?)
+}
+
+/// `quantize(srgb_encode(v))`: the scoring image's encode step as written in A4. It defines
+/// [`encode_quantize`] and builds its tables.
+fn encode_quantize_direct(v: f32) -> u8 {
+    quantize(srgb_encode(v))
+}
+
+/// `thresholds()[k - 1]` is the smallest non-negative f32 whose [`encode_quantize_direct`] byte
+/// is at least `k`, for `k = 1..=255`. The byte is monotone in `v` on `[+0, +inf]` (checked over
+/// every f32 by the ignored exhaustive test), so a binary search over the bit patterns finds it.
+fn thresholds() -> &'static [f32; 255] {
+    static TABLE: OnceLock<[f32; 255]> = OnceLock::new();
+    TABLE.get_or_init(|| {
+        let mut t = [0.0f32; 255];
+        for (k, slot) in (1u8..=255).zip(t.iter_mut()) {
+            let (mut lo, mut hi) = (0u32, f32::INFINITY.to_bits());
+            while lo < hi {
+                let mid = lo + (hi - lo) / 2;
+                if encode_quantize_direct(f32::from_bits(mid)) >= k {
+                    hi = mid;
+                } else {
+                    lo = mid + 1;
+                }
+            }
+            *slot = f32::from_bits(lo);
+        }
+        t
+    })
+}
+
+/// Bits dropped from a positive f32 below 1.0 to pick its bucket.
+const BUCKET_SHIFT: u32 = 15;
+/// Buckets covering the bit patterns of `[+0, 1.0)`.
+const BUCKETS: usize = (0x3F80_0000u32 >> BUCKET_SHIFT) as usize;
+
+/// The byte at the lowest value of each bucket: a lower bound for every value in the bucket.
+/// A static array (no heap block that could fragment the wasm heap).
+#[expect(
+    clippy::large_stack_arrays,
+    reason = "built once on the stack (32 KiB, far below the 1 MiB wasm stack), then moved into static storage"
+)]
+fn bucket_floor() -> &'static [u8; BUCKETS] {
+    static TABLE: OnceLock<[u8; BUCKETS]> = OnceLock::new();
+    TABLE.get_or_init(|| {
+        let mut t = [0u8; BUCKETS];
+        for (b, slot) in (0u32..).zip(t.iter_mut()) {
+            *slot = encode_quantize_direct(f32::from_bits(b << BUCKET_SHIFT));
+        }
+        t
+    })
+}
+
+/// [`encode_quantize_direct`] by table lookup: the same byte for every f32 (exhaustively
+/// verified), so scoring images and their hashes do not change. Start from the bucket's lower
+/// bound and step up past each threshold `<= v` (one or two steps at most in practice).
+fn encode_quantize(v: f32) -> u8 {
+    let bits = v.to_bits();
+    if bits < 1.0f32.to_bits() {
+        // +0, positive subnormals and positive normals below 1
+        let t = thresholds();
+        let mut k = bucket_floor()[(bits >> BUCKET_SHIFT) as usize];
+        while k < 255 && t[usize::from(k)] <= v {
+            k += 1;
+        }
+        k
+    } else if v >= 1.0 {
+        255
+    } else {
+        // negative values, -0 and NaN
+        0
+    }
 }
 
 #[cfg(test)]
@@ -405,6 +478,112 @@ mod tests {
                     height: 0
                 }
             );
+        }
+    }
+
+    mod encode_quantize_table {
+        use super::*;
+
+        fn check(v: f32) {
+            assert_eq!(
+                encode_quantize(v),
+                encode_quantize_direct(v),
+                "{v:e} ({:#010x})",
+                v.to_bits()
+            );
+        }
+
+        #[test]
+        fn matches_the_direct_formula_around_every_threshold() {
+            for (k, t) in thresholds().iter().enumerate() {
+                let b = t.to_bits();
+                for bits in [b - 2, b - 1, b, b + 1, b + 2] {
+                    check(f32::from_bits(bits));
+                }
+                // the threshold is where the byte first reaches k + 1
+                assert_eq!(usize::from(encode_quantize_direct(*t)), k + 1);
+                assert_eq!(
+                    usize::from(encode_quantize_direct(f32::from_bits(b - 1))),
+                    k
+                );
+            }
+        }
+
+        #[test]
+        fn matches_the_direct_formula_on_special_values() {
+            let specials = [
+                0.0f32,
+                -0.0,
+                1.0,
+                -1.0,
+                f32::from_bits(0x3F7F_FFFF), // 1 - ulp
+                f32::from_bits(0x3F80_0001), // 1 + ulp
+                1.055,
+                1e30,
+                f32::MAX,
+                f32::MIN,
+                f32::MIN_POSITIVE,
+                f32::from_bits(1), // smallest subnormal
+                -f32::from_bits(1),
+                0.003_130_8,
+                -0.5,
+                f32::INFINITY,
+                f32::NEG_INFINITY,
+                f32::NAN,
+                -f32::NAN,
+                f32::from_bits(0x7F80_0001), // signaling NaN payload
+                f32::from_bits(0xFFFF_FFFF),
+            ];
+            for v in specials {
+                check(v);
+            }
+            // NaN and every non-positive value quantize to 0, +inf and everything >= 1 to 255
+            assert_eq!(encode_quantize(f32::NAN), 0);
+            assert_eq!(encode_quantize(-0.0), 0);
+            assert_eq!(encode_quantize(f32::NEG_INFINITY), 0);
+            assert_eq!(encode_quantize(f32::INFINITY), 255);
+        }
+
+        #[test]
+        fn matches_the_direct_formula_on_sampled_bit_patterns() {
+            let mut s = 0x2545_F491_4F6C_DD1Du64;
+            for _ in 0..1_000_000 {
+                s ^= s << 13;
+                s ^= s >> 7;
+                s ^= s << 17;
+                check(f32::from_bits((s >> 32) as u32));
+                // dense in the scoring range [0, 1)
+                check(f32::from_bits((s as u32) % 0x3F80_0000));
+            }
+        }
+
+        /// All 2^32 f32 bit patterns, split across threads. Run once per change with
+        /// `cargo test --release -p engine-core --lib encode_quantize_table -- --ignored`.
+        #[test]
+        #[ignore = "exhaustive 2^32 check, minutes in release"]
+        fn matches_the_direct_formula_on_every_f32() {
+            let threads = std::thread::available_parallelism().map_or(4, usize::from) as u64;
+            let span = (1u64 << 32) / threads + 1;
+            let bad: u64 = std::thread::scope(|scope| {
+                let handles: Vec<_> = (0..threads)
+                    .map(|t| {
+                        scope.spawn(move || {
+                            let (lo, hi) = (t * span, ((t + 1) * span).min(1 << 32));
+                            (lo..hi)
+                                .filter(|&b| {
+                                    let v = f32::from_bits(b as u32);
+                                    encode_quantize(v) != encode_quantize_direct(v)
+                                })
+                                .count() as u64
+                        })
+                    })
+                    .collect();
+                handles
+                    .into_iter()
+                    .map(|h| h.join().expect("worker panicked"))
+                    .sum()
+            });
+            assert_eq!(bad, 0);
         }
     }
 }

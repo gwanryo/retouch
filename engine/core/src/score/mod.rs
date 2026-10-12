@@ -14,13 +14,11 @@ pub use gate::{
 };
 
 use crate::buffer::{dequantize, Rgba8};
-use crate::color::{delta_e00, linear_srgb_to_lab_d50, srgb_decode, Lab};
+use crate::color::{delta_e00_with_chroma, hypot_hw, linear_srgb_to_lab_d50, srgb_decode, Lab};
 use crate::recipe::Crop;
 use crate::region::{RegionError, RegionMask, RegionSpec};
 use crate::resample::{scoring_image, ResampleError};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
-use std::hash::{BuildHasherDefault, Hasher};
 use thiserror::Error;
 
 /// Scoring failures.
@@ -137,72 +135,115 @@ pub struct Score {
     pub scoring_version: String,
 }
 
-/// Hasher for packed color keys. Memo lookups only decide speed, never values: every entry is
-/// the same pure function of its key, so results are bit-identical to computing per pixel.
-#[derive(Clone, Copy, Default)]
-struct ColorHasher(u64);
+/// Direct-mapped memo from a packed color key to a value: one slot per hash of the key, a miss
+/// overwrites the slot. Lookups only decide speed, never values: every value is the same pure
+/// function of its key, so results are bit-identical to computing per pixel (Plan 1b-1 C1/C4).
+struct DirectMemo<V> {
+    /// Key with the [`DirectMemo::TAG`] bit set; `0` marks an empty slot.
+    keys: Vec<u64>,
+    values: Vec<V>,
+    shift: u32,
+}
 
-impl Hasher for ColorHasher {
-    fn finish(&self) -> u64 {
-        self.0
-    }
+impl<V: Copy> DirectMemo<V> {
+    /// Above every packed key (`rgb_key` is 24 bits, a pair 48), so a tagged key is never 0.
+    const TAG: u64 = 1 << 48;
 
-    fn write(&mut self, bytes: &[u8]) {
-        for &b in bytes {
-            self.write_u64(self.0 ^ u64::from(b));
+    fn new(bits: u32, empty: V) -> Self {
+        Self {
+            keys: vec![0; 1 << bits],
+            values: vec![empty; 1 << bits],
+            shift: 64 - bits,
         }
     }
 
-    fn write_u64(&mut self, n: u64) {
-        // multiplicative mix; fold the high half down so both bucket bits and tag bits vary
-        let h = n.wrapping_mul(0x9E37_79B9_7F4A_7C15);
-        self.0 = h ^ (h >> 32);
+    fn get_or(&mut self, key: u64, f: impl FnOnce() -> V) -> V {
+        let k = key | Self::TAG;
+        let slot = (k.wrapping_mul(0x9E37_79B9_7F4A_7C15) >> self.shift) as usize;
+        if self.keys[slot] == k {
+            self.values[slot]
+        } else {
+            let v = f();
+            self.keys[slot] = k;
+            self.values[slot] = v;
+            v
+        }
     }
 }
 
-type ColorMemo<V> = HashMap<u64, V, BuildHasherDefault<ColorHasher>>;
+/// Color memo slots (2^17): a scoring image has some 10^5 distinct colors.
+const COLOR_MEMO_BITS: u32 = 17;
+/// Pair memo slots (2^19, 8 MiB): a heavy-grain player has some 5 * 10^5 distinct color pairs.
+const PAIR_MEMO_BITS: u32 = 19;
+
+/// An empty memo for [`delta_e_image`].
+fn pair_memo() -> DirectMemo<f64> {
+    DirectMemo::new(PAIR_MEMO_BITS, 0.0)
+}
 
 /// RGB bytes of an RGBA8 pixel as a 24-bit key.
 fn rgb_key(p: &[u8]) -> u64 {
     u64::from(p[0]) << 16 | u64::from(p[1]) << 8 | u64::from(p[2])
 }
 
-/// Lab of every pixel, computed once per distinct color (Plan 1b-1 C1/C4).
-fn lab_image(img: &Rgba8) -> Vec<Lab> {
+/// Lab and chroma `C*ab = hypot(a, b)` of every pixel of a scoring image.
+#[derive(Clone, Debug)]
+struct LabImage {
+    lab: Vec<Lab>,
+    chroma: Vec<f64>,
+}
+
+/// Lab and chroma of every pixel, computed once per distinct color (Plan 1b-1 C1/C4).
+fn lab_image(img: &Rgba8) -> LabImage {
     let lut: Vec<f32> = (0..=255u8).map(|v| srgb_decode(dequantize(v))).collect();
-    let mut memo = ColorMemo::<Lab>::default();
-    img.data()
+    let empty = (
+        Lab {
+            l: 0.0,
+            a: 0.0,
+            b: 0.0,
+        },
+        0.0,
+    );
+    let mut memo = DirectMemo::new(COLOR_MEMO_BITS, empty);
+    let (lab, chroma) = img
+        .data()
         .chunks_exact(4)
         .map(|p| {
-            *memo.entry(rgb_key(p)).or_insert_with(|| {
+            memo.get_or(rgb_key(p), || {
                 let c = |i: usize| lut[usize::from(p[i])];
-                linear_srgb_to_lab_d50(c(0), c(1), c(2))
+                let lab = linear_srgb_to_lab_d50(c(0), c(1), c(2));
+                (lab, hypot_hw(lab.a, lab.b))
             })
         })
-        .collect()
+        .unzip();
+    LabImage { lab, chroma }
 }
 
 /// Per-pixel ΔE00 between two scoring images in pixel order. A pixel whose RGB bytes are equal
 /// has equal Lab, and ΔE00 of equal Lab is exactly `+0.0` (exhaustively tested in `color`), so
 /// it is skipped. Otherwise ΔE00 is computed once per distinct (a, b) color pair: Lab is a pure
 /// function of the color, so the value at every position is bit-identical to `delta_e00`.
+/// `memo` comes from [`pair_memo`]; the caller picks when it is allocated.
 fn delta_e_image<'a>(
     a: &'a Rgba8,
-    lab_a: &'a [Lab],
+    lab_a: &'a LabImage,
     b: &'a Rgba8,
-    lab_b: &'a [Lab],
+    lab_b: &'a LabImage,
+    memo: DirectMemo<f64>,
 ) -> impl Iterator<Item = f64> + 'a {
+    let colors_a = lab_a.lab.iter().zip(&lab_a.chroma);
+    let colors_b = lab_b.lab.iter().zip(&lab_b.chroma);
     a.data()
         .chunks_exact(4)
         .zip(b.data().chunks_exact(4))
-        .zip(lab_a.iter().zip(lab_b))
-        .scan(ColorMemo::<f64>::default(), |memo, ((pa, pb), (la, lb))| {
+        .zip(colors_a.zip(colors_b))
+        .scan(memo, |memo, ((pa, pb), ((la, ca), (lb, cb)))| {
             Some(if pa[..3] == pb[..3] {
                 0.0
             } else {
-                *memo
-                    .entry(rgb_key(pa) << 24 | rgb_key(pb))
-                    .or_insert_with(|| delta_e00(*la, *lb))
+                memo.get_or(rgb_key(pa) << 24 | rgb_key(pb), || {
+                    delta_e00_with_chroma(*la, *ca, *lb, *cb)
+                })
             })
         })
 }
@@ -244,7 +285,7 @@ pub struct ScoringReference {
     mask: RegionMask,
     original_scoring: Rgba8,
     answer_scoring: Rgba8,
-    lab_answer: Vec<Lab>,
+    lab_answer: LabImage,
     d_e_original: f64,
     dl_original: f64,
     dc_original: f64,
@@ -255,6 +296,10 @@ impl ScoringReference {
     pub fn new(original: &Rgba8, answer: &Rgba8, region: &RegionSpec) -> Result<Self, ScoreError> {
         let (width, height) = (original.width(), original.height());
         check_size(answer, width, height)?;
+        // Allocated before the scoring-image buffers: when it is freed it leaves a hole below
+        // them instead of splitting the large one they leave. Allocated after them, the wasm heap
+        // ends up 24-32 MiB larger once players are scored (measured peak 141 vs 117-128 MiB).
+        let memo = pair_memo();
         let original_scoring = scoring_image(original, crate::SCORING_LONG_EDGE)?;
         let answer_scoring = scoring_image(answer, crate::SCORING_LONG_EDGE)?;
         let (sw, sh) = (answer_scoring.width(), answer_scoring.height());
@@ -264,16 +309,19 @@ impl ScoringReference {
         }
         let lab_answer = lab_image(&answer_scoring);
         let lab_o = lab_image(&original_scoring);
-        let pairs = || lab_o.iter().zip(&lab_answer);
+        let pairs = || lab_o.lab.iter().zip(&lab_answer.lab);
         let d_e_original = mean_over(
-            delta_e_image(&original_scoring, &lab_o, &answer_scoring, &lab_answer),
+            delta_e_image(
+                &original_scoring,
+                &lab_o,
+                &answer_scoring,
+                &lab_answer,
+                memo,
+            ),
             &mask,
         );
         let dl_original = mean_over(pairs().map(|(o, a)| (o.l - a.l).abs()), &mask);
-        let dc_original = mean_over(
-            pairs().map(|(o, a)| libm::hypot(o.a - a.a, o.b - a.b)),
-            &mask,
-        );
+        let dc_original = mean_over(pairs().map(|(o, a)| hypot_hw(o.a - a.a, o.b - a.b)), &mask);
         Ok(Self {
             width,
             height,
@@ -315,14 +363,15 @@ impl ScoringReference {
             &lab_p,
             &self.answer_scoring,
             &self.lab_answer,
+            pair_memo(),
         )
         .collect();
         let stats = error_stats(&de, &self.mask)?;
         let v = verdict(&stats, self.d_e_original);
-        let pairs = || lab_p.iter().zip(&self.lab_answer);
+        let pairs = || lab_p.lab.iter().zip(&self.lab_answer.lab);
         let dl = mean_over(pairs().map(|(p, a)| (p.l - a.l).abs()), &self.mask);
         let dc = mean_over(
-            pairs().map(|(p, a)| libm::hypot(p.a - a.a, p.b - a.b)),
+            pairs().map(|(p, a)| hypot_hw(p.a - a.a, p.b - a.b)),
             &self.mask,
         );
         Ok(Score {
@@ -356,7 +405,7 @@ impl ScoringReference {
 mod tests {
     use super::*;
     use crate::buffer::ImageF32;
-    use crate::color::{linear_srgb_to_lab_d50, srgb_decode};
+    use crate::color::{delta_e00, linear_srgb_to_lab_d50, srgb_decode};
     use crate::recipe::Recipe;
     use crate::render::{render_rgba8, RenderContext};
 
@@ -663,12 +712,13 @@ mod tests {
                 .filter(|(p, q)| p[..3] == q[..3])
                 .count();
             assert_eq!(same, equal_pixels);
-            let fast: Vec<u64> = delta_e_image(&sa, &la, &sb, &lb)
+            let fast: Vec<u64> = delta_e_image(&sa, &la, &sb, &lb, pair_memo())
                 .map(f64::to_bits)
                 .collect();
             let naive: Vec<u64> = la
+                .lab
                 .iter()
-                .zip(&lb)
+                .zip(&lb.lab)
                 .map(|(x, y)| delta_e00(*x, *y).to_bits())
                 .collect();
             assert_eq!(fast, naive);
@@ -712,13 +762,82 @@ mod tests {
         let a = palette_image(97, 61, &PALETTE, |i| i);
         let b = palette_image(97, 61, &PALETTE, |i| i / 3 + i % 5);
         let (la, lb) = (lab_image(&a), lab_image(&b));
-        let fast: Vec<u64> = delta_e_image(&a, &la, &b, &lb).map(f64::to_bits).collect();
+        let fast: Vec<u64> = delta_e_image(&a, &la, &b, &lb, pair_memo())
+            .map(f64::to_bits)
+            .collect();
         let naive: Vec<u64> = la
+            .lab
             .iter()
-            .zip(&lb)
+            .zip(&lb.lab)
             .map(|(x, y)| delta_e00(*x, *y).to_bits())
             .collect();
         assert_eq!(fast, naive);
+    }
+
+    /// `w`×`h` image of distinct colors (pixel index as 24-bit RGB, scrambled by `mix`).
+    fn distinct_image(w: u32, h: u32, mix: u32) -> Rgba8 {
+        let data = (0..w * h)
+            .flat_map(|i| {
+                let c = i.wrapping_mul(mix) & 0x00FF_FFFF;
+                [(c >> 16) as u8, (c >> 8) as u8, c as u8, 255]
+            })
+            .collect();
+        Rgba8::new(w, h, data).unwrap()
+    }
+
+    /// Same key hits without recomputing; a colliding key evicts it, and the evicted key is
+    /// recomputed (A -> B -> A on one memo).
+    #[test]
+    fn direct_memo_evicts_on_collision_and_recomputes() {
+        let mut memo = DirectMemo::new(1, 0u64); // 2 slots
+        let slot = |k: u64| (k | DirectMemo::<u64>::TAG).wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 63;
+        let a = 1u64;
+        let b = (2u64..1000).find(|&k| slot(k) == slot(a)).unwrap();
+        let mut calls = 0;
+        let mut get = |m: &mut DirectMemo<u64>, k: u64| {
+            m.get_or(k, || {
+                calls += 1;
+                k * 10
+            })
+        };
+        assert_eq!(get(&mut memo, a), 10);
+        assert_eq!(get(&mut memo, a), 10); // hit
+        assert_eq!(get(&mut memo, b), b * 10); // evicts a
+        assert_eq!(get(&mut memo, a), 10); // recomputed
+        assert_eq!(calls, 3);
+    }
+
+    /// More distinct colors and pairs than slots, so memo slots are overwritten, and every value
+    /// still equals the uncached one. Each combination uses a fresh pair memo.
+    #[test]
+    fn direct_mapped_memos_match_naive_when_slots_collide() {
+        // 2^18 distinct colors per image: twice the color memo's slots, half the pair memo's
+        let a = distinct_image(512, 512, 0x9E37_79B1);
+        let b = palette_image(512, 512, &PALETTE, |i| i / 7);
+        let mut a4 = a.data().to_vec();
+        a4.rotate_left(4 * 65_536); // the same colors at other positions, so pairs differ
+        let a2 = Rgba8::new(512, 512, a4).unwrap();
+        for (x, y) in [(&a, &b), (&a2, &a), (&b, &a2)] {
+            let (lx, ly) = (lab_image(x), lab_image(y));
+            assert_lab_matches_uncached(x);
+            let fast: Vec<u64> = delta_e_image(x, &lx, y, &ly, pair_memo())
+                .map(f64::to_bits)
+                .collect();
+            let naive: Vec<u64> = lx
+                .lab
+                .iter()
+                .zip(&ly.lab)
+                .zip(x.data().chunks_exact(4).zip(y.data().chunks_exact(4)))
+                .map(|((p, q), (px, py))| {
+                    if px[..3] == py[..3] {
+                        0
+                    } else {
+                        delta_e00(*p, *q).to_bits()
+                    }
+                })
+                .collect();
+            assert_eq!(fast, naive);
+        }
     }
 
     fn assert_lab_matches_uncached(img: &Rgba8) {
@@ -731,11 +850,20 @@ mod tests {
                 [l.l.to_bits(), l.a.to_bits(), l.b.to_bits()]
             })
             .collect();
-        let got: Vec<[u64; 3]> = lab_image(img)
+        let lab = lab_image(img);
+        let got: Vec<[u64; 3]> = lab
+            .lab
             .iter()
             .map(|l| [l.l.to_bits(), l.a.to_bits(), l.b.to_bits()])
             .collect();
         assert_eq!(got, naive);
+        // chroma equals libm's hypot of the uncached Lab
+        let want: Vec<u64> = naive
+            .iter()
+            .map(|l| libm::hypot(f64::from_bits(l[1]), f64::from_bits(l[2])).to_bits())
+            .collect();
+        let got: Vec<u64> = lab.chroma.iter().map(|c| c.to_bits()).collect();
+        assert_eq!(got, want);
     }
 
     #[test]
@@ -795,15 +923,20 @@ mod tests {
         });
         let ps = ps.unwrap();
         let sa = scoring_image(&answer, 1024).unwrap();
-        let mut lp = Vec::new();
+        let mut lp = lab_image(&ps);
         median("lab_image", &mut || lp = lab_image(&ps));
         let la = lab_image(&sa);
         let mut de = Vec::new();
         median("delta_e00 every pixel", &mut || {
-            de = lp.iter().zip(&la).map(|(p, a)| delta_e00(*p, *a)).collect();
+            de = lp
+                .lab
+                .iter()
+                .zip(&la.lab)
+                .map(|(p, a)| delta_e00(*p, *a))
+                .collect();
         });
         median("delta_e_image", &mut || {
-            de = delta_e_image(&ps, &lp, &sa, &la).collect();
+            de = delta_e_image(&ps, &lp, &sa, &la, pair_memo()).collect();
         });
         let mask = FULL.rasterize(ps.width(), ps.height()).unwrap();
         median("error_stats", &mut || {

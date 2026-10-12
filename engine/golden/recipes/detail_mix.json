@@ -1,0 +1,5 @@
+{ "schema_version": 1,
+  "basic": { "texture": 25, "clarity": 30, "dehaze": 20 },
+  "detail": { "sharpen_amount": 60, "sharpen_radius": 1.2, "sharpen_detail": 30, "sharpen_masking": 20,
+              "grain_amount": 25, "grain_size": 30, "grain_frequency": 60,
+              "vignette_amount": -30, "vignette_midpoint": 40, "vignette_feather": 60 } }

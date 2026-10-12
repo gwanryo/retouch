@@ -1,0 +1,4 @@
+{ "schema_version": 1,
+  "basic": { "dehaze": -25, "clarity": -20 },
+  "detail": { "vignette_amount": 35, "vignette_midpoint": 60, "vignette_feather": 30,
+              "grain_amount": 40, "grain_size": 60, "grain_frequency": 30 } }

@@ -3,16 +3,14 @@
 //! On 8-bit input, stages 1-5 are a pure function of a pixel's three bytes `(r, g, b)`: stages
 //! 1-3 are a per-channel LUT and stages 4-5 are per-pixel arithmetic with no position, seed or
 //! neighbour input. Equal bytes therefore give equal output bytes, and a cache keyed on the bytes
-//! returns exactly what recomputing would. Only misses run the stages, the finiteness check and
-//! `buffer::quantize`, so the first non-finite pixel is always met on a miss.
+//! returns exactly what recomputing would. On the byte path only misses run the stages, the
+//! finiteness check and `buffer::quantize`, so the first non-finite pixel is always met on a miss.
 //!
-//! VALID ONLY while stages 1-5 are per-pixel and position-independent. Spatial or positional
-//! stages (clarity, texture, dehaze, vignette, grain, local masks, Plan 1b split 3 onward) break
-//! that premise: when they land, move the cache in front of them, i.e. cache the stage-5 output
-//! as `[f32; 3]` and run the spatial stages on every pixel afterwards (the "EF" shape in the
-//! Task 6 profile).
+//! The f32 cache holds the stage 1-5 output; the spatial stages, the finiteness check and
+//! `finish` then run on every output pixel (Plan 1b-3). The byte cache is only valid while nothing after stage 5 needs position or
+//! neighbours.
 
-/// log2 of the slot count. 2^18 slots of 8 bytes = 2 MiB, allocated per render call.
+/// log2 of the slot count. 2^18 slots (8 bytes per byte slot = 2 MiB, 16 per f32 slot = 4 MiB), allocated per render call.
 const SLOT_BITS: u32 = 18;
 const SLOTS: usize = 1 << SLOT_BITS;
 /// Fibonacci hashing multiplier (2^32 / golden ratio, odd).
@@ -40,37 +38,47 @@ pub(super) fn falls_back(total_pixels: usize, probe_hits: usize) -> bool {
 }
 
 #[derive(Clone, Copy)]
-struct Slot {
+struct Slot<V> {
     key: u32,
-    rgb: [u8; 3],
+    value: V,
 }
 
-/// Direct-mapped cache from input bytes to output bytes. A colliding insert overwrites.
-pub(super) struct ByteMemo {
-    slots: Vec<Slot>,
+/// Direct-mapped cache from input bytes to a value of type `V`. A colliding insert overwrites.
+pub(super) struct Memo<V: Copy> {
+    slots: Vec<Slot<V>>,
 }
 
-impl ByteMemo {
+/// Output bytes of stages 1-5 through the final quantization.
+#[cfg(test)]
+pub(super) type ByteMemo = Memo<[u8; 3]>;
+
+/// Unquantized stage 1-5 output.
+#[cfg(test)]
+pub(super) type F32Memo = Memo<[f32; 3]>;
+
+impl<V: Copy + Default> Memo<V> {
+    /// Empty cache: every slot holds key 0, which no [`key`] value equals.
     pub(super) fn new() -> Self {
         Self {
             slots: vec![
                 Slot {
                     key: 0,
-                    rgb: [0; 3]
+                    value: V::default()
                 };
                 SLOTS
             ],
         }
     }
 
-    /// Output bytes stored for exactly `key`, if any (a different key in the slot is a miss).
-    pub(super) fn get(&self, key: u32) -> Option<[u8; 3]> {
+    /// Value stored for exactly `key`, if any (a different key in the slot is a miss).
+    pub(super) fn get(&self, key: u32) -> Option<V> {
         let slot = self.slots[slot_of(key)];
-        (slot.key == key).then_some(slot.rgb)
+        (slot.key == key).then_some(slot.value)
     }
 
-    pub(super) fn insert(&mut self, key: u32, rgb: [u8; 3]) {
-        self.slots[slot_of(key)] = Slot { key, rgb };
+    /// Stores `value` for `key`, evicting whatever shared its slot.
+    pub(super) fn insert(&mut self, key: u32, value: V) {
+        self.slots[slot_of(key)] = Slot { key, value };
     }
 }
 
@@ -119,5 +127,24 @@ mod tests {
         assert_eq!(memo.get(b), None);
         memo.insert(b, [4, 5, 6]);
         assert_eq!((memo.get(a), memo.get(b)), (None, Some([4, 5, 6])));
+    }
+
+    #[test]
+    fn empty_f32_cache_misses_black() {
+        assert_eq!(F32Memo::new().get(key(0, 0, 0)), None);
+    }
+
+    #[test]
+    fn colliding_key_overwrites_and_misses_the_old_one_f32() {
+        let a = key(10, 20, 30);
+        let b = (0..1u32 << 24)
+            .map(|v| v | VALID)
+            .find(|&k| k != a && slot_of(k) == slot_of(a))
+            .unwrap();
+        let mut memo = F32Memo::new();
+        memo.insert(a, [1.0, 2.0, 3.0]);
+        assert_eq!(memo.get(b), None);
+        memo.insert(b, [4.0, 5.0, 6.0]);
+        assert_eq!((memo.get(a), memo.get(b)), (None, Some([4.0, 5.0, 6.0])));
     }
 }

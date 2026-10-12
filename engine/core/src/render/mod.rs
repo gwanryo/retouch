@@ -3,14 +3,27 @@
 //! 1. encoded → linear (`srgb_decode`, unclamped)
 //! 2. linear stage: exposure, white balance
 //! 3. linear → encoded (`srgb_encode`, unclamped)
-//! 4. encoded stage: contrast/highlights/shadows/whites/blacks, then vibrance/saturation
+//! 4. (a) dehaze, then the encoded stage: contrast/highlights/shadows/whites/blacks, then
+//!    vibrance/saturation. Dehaze runs before basic tone, not after.
 //! 5. global color, per pixel on encoded values: (a) tone curve, master then per channel
 //!    (`curve`), (b) HSL 8 bands (`hsl`), (c) color grading (`grade`), (d) split toning
 //!    (`grade`). Inactive features are skipped, so recipes that do not use them render
 //!    bit-identically to Plan 1a.
-//! 6. [Plan 1b later splits: range-mask eval on the ORIGINAL linear pixel, mask composite,
-//!    detail]
-//! 7. finiteness check. Clamping happens only in `buffer::quantize` (A3 point ①).
+//! 6. texture and clarity (`clarity`): local contrast on the whole buffer. Both read the luma
+//!    of the stage-5 output.
+//! 7. [split 4, planned: range-mask eval, mask composite]. The composite goes between
+//!    `SpatialOps::apply_global` and `SpatialOps::apply_detail`. Range masks are evaluated on
+//!    the original `src`, not on the corrected pixels. Per-mask clarity lives inside stage 7 and
+//!    reads the stage-6 output (after global texture and clarity); per-mask sharpening attaches
+//!    to stage 8a as a per-pixel amount.
+//! 8. detail (`detail`): (a) sharpening, (b) vignette, (c) grain.
+//! 9. finiteness check. Clamping happens only in `buffer::quantize` (A3 point ①).
+//!
+//! When a spatial feature (texture, clarity, sharpen, vignette, grain) is active,
+//! [`render_rgba8`] fills an f32 buffer with stages 1-5 (LUT and memo) and runs
+//! `SpatialOps::apply_global` and `SpatialOps::apply_detail` on it, the same functions the
+//! general path uses. Blurs run in row order and vignette/grain use per-column and per-row
+//! tables, bit-identical to their definitions. When none is active, the byte-cache path runs.
 //!
 //! Input and output are encoded-sRGB `ImageF32` of the SAME size, always (master plan A10):
 //! the recipe's `crop` is never applied here. Cropping is a separate display operation
@@ -25,20 +38,25 @@
 //! [`render_rgba8`]); stages are never reordered to fit the LUT.
 
 pub mod basic;
+mod blur;
+mod clarity;
 mod curve;
+mod detail;
 mod grade;
 mod hsl;
 mod memo;
+mod spatial;
 
 use crate::buffer::{dequantize, quantize, BufferError, ImageF32, Rgba8};
 use crate::color::{srgb_decode, srgb_encode};
 use crate::recipe::{Basic, Normalized, Recipe};
+use spatial::SpatialOps;
 use thiserror::Error;
 
 /// Per-render inputs that are not part of the recipe.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct RenderContext {
-    /// Challenge seed (manifest `seed`, AC-E1d). Consumed by grain from Plan 1b; ignored now.
+    /// Challenge seed (manifest `seed`, AC-E1d). Consumed by grain (stage 8c).
     pub seed: u32,
 }
 
@@ -65,16 +83,7 @@ pub enum RenderError {
 /// pixels; Plan 1b's renderer must treat every inactive case as a no-op too. `crop` is never
 /// listed: render ignores it by contract (A10).
 pub fn unsupported_feature(r: &Recipe) -> Option<&'static str> {
-    let b = &r.basic;
-    let checks: [(&'static str, bool); 7] = [
-        ("basic.texture", b.texture != 0.0),
-        ("basic.clarity", b.clarity != 0.0),
-        ("basic.dehaze", b.dehaze != 0.0),
-        ("detail.sharpen", r.detail.sharpen_amount != 0.0),
-        ("detail.grain", r.detail.grain_amount != 0.0),
-        ("detail.vignette", r.detail.vignette_amount != 0.0),
-        ("masks", !r.masks.is_empty()),
-    ];
+    let checks: [(&'static str, bool); 1] = [("masks", !r.masks.is_empty())];
     checks
         .into_iter()
         .find(|&(_, active)| active)
@@ -85,13 +94,21 @@ pub fn unsupported_feature(r: &Recipe) -> Option<&'static str> {
 pub fn render(
     src: &ImageF32,
     recipe: &Normalized,
-    _ctx: &RenderContext, // seed is consumed by grain from Plan 1b
+    ctx: &RenderContext,
 ) -> Result<ImageF32, RenderError> {
     let r = recipe.recipe();
     reject_unsupported(r)?;
     let b = &r.basic;
     let ops = GlobalOps::new(r);
-    let out = src.map_pixels(|px| global_encoded(linear_stage(px.map(srgb_decode), b), &ops));
+    let mut out = src.map_pixels(|px| global_encoded(linear_stage(px.map(srgb_decode), b), &ops));
+    if let Some(sp) = SpatialOps::new(r) {
+        let (w, h) = (out.width(), out.height());
+        let (wu, hu) = (w as usize, h as usize);
+        let mut s = out.into_samples();
+        sp.apply_global(&mut s, wu, hu);
+        sp.apply_detail(&mut s, wu, hu, ctx.seed);
+        out = ImageF32::from_samples(w, h, s)?;
+    }
     finite(out)
 }
 
@@ -117,6 +134,8 @@ fn linear_stage(lin: [f32; 3], b: &Basic) -> [f32; 3] {
 /// a recipe that does not use them renders bit-identically to Plan 1a.
 struct GlobalOps<'a> {
     basic: &'a Basic,
+    /// Stage 4a, `dehaze / 100`; `None` when dehaze is 0.
+    dehaze: Option<f32>,
     curves: Option<curve::CurveSet>,
     hsl: Option<hsl::HslPlan>,
     grade: Option<grade::GradePlan>,
@@ -127,6 +146,7 @@ impl<'a> GlobalOps<'a> {
     fn new(r: &'a Recipe) -> Self {
         Self {
             basic: &r.basic,
+            dehaze: (r.basic.dehaze != 0.0).then(|| r.basic.dehaze / 100.0),
             curves: curve::CurveSet::new(&r.tone_curve),
             hsl: hsl::HslPlan::new(&r.hsl),
             grade: grade::GradePlan::new(&r.color_grade),
@@ -134,14 +154,19 @@ impl<'a> GlobalOps<'a> {
         }
     }
 
-    /// No stage-5 feature is active, so stage 4 alone is the whole of stages 4-5.
-    fn stage5_inactive(&self) -> bool {
-        self.curves.is_none() && self.hsl.is_none() && self.grade.is_none() && self.split.is_none()
+    /// Neither dehaze (4a) nor any stage-5 feature is active, so the basic tone and color of
+    /// stage 4 alone are the whole of stages 4-5.
+    fn only_basic(&self) -> bool {
+        self.dehaze.is_none()
+            && self.curves.is_none()
+            && self.hsl.is_none()
+            && self.grade.is_none()
+            && self.split.is_none()
     }
 }
 
 /// Stage 4 alone: the same calls, in the same order, as the stage-4 lines of [`global_encoded`],
-/// so it is bit-identical to it whenever [`GlobalOps::stage5_inactive`] holds. A separate body
+/// so it is bit-identical to it whenever [`GlobalOps::only_basic`] holds. A separate body
 /// (not called from `global_encoded`) gives the stage-5-free recipes their own monomorphic loop;
 /// sharing one generic loop with the stage-5 checks cost +10% render time (Task 6 profile F).
 fn basic_encoded(enc: [f32; 3], b: &Basic) -> [f32; 3] {
@@ -153,6 +178,10 @@ fn basic_encoded(enc: [f32; 3], b: &Basic) -> [f32; 3] {
 /// then tone curve (5a), HSL (5b), color grading (5c) and split toning (5d).
 fn global_encoded(enc: [f32; 3], ops: &GlobalOps) -> [f32; 3] {
     let b = ops.basic;
+    let enc = match ops.dehaze {
+        Some(d) => basic::apply_dehaze_encoded(enc, d),
+        None => enc,
+    };
     let enc = basic::apply_tone_encoded(enc, b);
     let mut px = basic::apply_color_encoded(enc, b.vibrance, b.saturation);
     if let Some(c) = &ops.curves {
@@ -199,14 +228,14 @@ fn linear_stage_lut(b: &Basic) -> [[f32; 256]; 3] {
 pub(crate) fn render_rgba8_f32(
     src: &Rgba8,
     recipe: &Normalized,
-    _ctx: RenderContext, // seed is consumed by grain from Plan 1b
+    ctx: RenderContext,
 ) -> Result<ImageF32, RenderError> {
     let r = recipe.recipe();
     reject_unsupported(r)?;
     let b = &r.basic;
     let lut = linear_stage_lut(b);
     let ops = GlobalOps::new(r);
-    let samples = src
+    let mut samples: Vec<f32> = src
         .data()
         .chunks_exact(4)
         .flat_map(|p| {
@@ -218,6 +247,11 @@ pub(crate) fn render_rgba8_f32(
             global_encoded(enc, &ops)
         })
         .collect();
+    if let Some(sp) = SpatialOps::new(r) {
+        let (w, h) = (src.width() as usize, src.height() as usize);
+        sp.apply_global(&mut samples, w, h);
+        sp.apply_detail(&mut samples, w, h, ctx.seed);
+    }
     finite(ImageF32::from_samples(src.width(), src.height(), samples)?)
 }
 
@@ -225,15 +259,15 @@ pub(crate) fn render_rgba8_f32(
 /// (master plan A3 point ①). This is what the answer PNG stores.
 ///
 /// Bit-identical to `render(&ImageF32::from_rgba8(src), ..)?.to_rgba8()`, but faster: stages 1-3
-/// come from the LUT, recipes without stage-5 features run a stage-4-only loop, and pixels are
+/// come from the LUT, recipes with neither dehaze nor stage-5 features run a basic-only loop, and pixels are
 /// memoized by their input bytes (see `render/memo.rs` for why that is exact and when it stops being
 /// valid). Output alpha is 255, as `ImageF32::to_rgba8` writes it.
 pub fn render_rgba8(
     src: &Rgba8,
     recipe: &Normalized,
-    _ctx: &RenderContext, // seed is consumed by grain from Plan 1b
+    ctx: &RenderContext,
 ) -> Result<Rgba8, RenderError> {
-    render_rgba8_with(src, recipe, Strategy::Memo).map(|(img, _)| img)
+    render_rgba8_with(src, recipe, *ctx, Strategy::Memo).map(|(img, _)| img)
 }
 
 /// How [`shade`] visits pixels. Both give the same bytes and the same error.
@@ -263,19 +297,53 @@ struct MemoStats {
 fn render_rgba8_with(
     src: &Rgba8,
     recipe: &Normalized,
+    ctx: RenderContext,
     strategy: Strategy,
 ) -> Result<(Rgba8, MemoStats), RenderError> {
     let r = recipe.recipe();
     reject_unsupported(r)?;
+    if let Some(sp) = SpatialOps::new(r) {
+        let (samples, stats) = spatial_samples(src, r, &sp, ctx.seed, strategy);
+        let mut data = Vec::with_capacity(src.data().len());
+        for px in samples.chunks_exact(3) {
+            let [red, green, blue] = finish([px[0], px[1], px[2]])?;
+            data.extend_from_slice(&[red, green, blue, 255]);
+        }
+        return Ok((Rgba8::new(src.width(), src.height(), data)?, stats));
+    }
     let lut = linear_stage_lut(&r.basic);
     let ops = GlobalOps::new(r);
-    let (data, stats) = if ops.stage5_inactive() {
+    let (data, stats) = if ops.only_basic() {
         let b = ops.basic;
         shade(src.data(), &lut, |enc| basic_encoded(enc, b), strategy)?
     } else {
         shade(src.data(), &lut, |enc| global_encoded(enc, &ops), strategy)?
     };
     Ok((Rgba8::new(src.width(), src.height(), data)?, stats))
+}
+
+/// Spatial path: stages 1-5 per pixel through [`shade_f32`] (kernel chosen as in the byte path),
+/// then `apply_global` and `apply_detail` on the unquantized RGB buffer (capacity `3 * pixels`).
+/// The byte buffer is allocated by the caller only after this returns.
+fn spatial_samples(
+    src: &Rgba8,
+    r: &Recipe,
+    sp: &SpatialOps,
+    seed: u32,
+    strategy: Strategy,
+) -> (Vec<f32>, MemoStats) {
+    let lut = linear_stage_lut(&r.basic);
+    let ops = GlobalOps::new(r);
+    let (mut samples, stats) = if ops.only_basic() {
+        let b = ops.basic;
+        shade_f32(src.data(), &lut, |enc| basic_encoded(enc, b), strategy)
+    } else {
+        shade_f32(src.data(), &lut, |enc| global_encoded(enc, &ops), strategy)
+    };
+    let (w, h) = (src.width() as usize, src.height() as usize);
+    sp.apply_global(&mut samples, w, h);
+    sp.apply_detail(&mut samples, w, h, seed);
+    (samples, stats)
 }
 
 /// Stages 4-5 by `kernel` on LUT-encoded RGBA8 pixels `px`, then stage 7 and quantization.
@@ -286,21 +354,88 @@ fn shade<K: Fn([f32; 3]) -> [f32; 3]>(
     kernel: K,
     strategy: Strategy,
 ) -> Result<(Vec<u8>, MemoStats), RenderError> {
-    let mut out = Vec::with_capacity(px.len());
+    drive::<[u8; 3], u8, RenderError>(
+        px,
+        strategy,
+        px.len(),
+        |p| finish(kernel(lut_pixel(p, lut))),
+        |out, [r, g, b]| out.extend_from_slice(&[r, g, b, 255]),
+    )
+}
+
+/// Stages 4-5 by `kernel` on LUT-encoded RGBA8 pixels `px`, unquantized: RGB triples (length
+/// `3 * pixels`), no finiteness check, so NaN and infinity pass through with their bits. Same
+/// probe and fallback rules as [`shade`].
+fn shade_f32<K: Fn([f32; 3]) -> [f32; 3]>(
+    px: &[u8],
+    lut: &[[f32; 256]; 3],
+    kernel: K,
+    strategy: Strategy,
+) -> (Vec<f32>, MemoStats) {
+    let infallible = drive::<[f32; 3], f32, std::convert::Infallible>(
+        px,
+        strategy,
+        px.len() / 4 * 3,
+        |p| Ok(kernel(lut_pixel(p, lut))),
+        |out, rgb| out.extend_from_slice(&rgb),
+    );
+    match infallible {
+        Ok(done) => done,
+        Err(never) => match never {},
+    }
+}
+
+/// Probe, decide, then cache or go direct, shared by [`shade`] and [`shade_f32`]. `compute` maps
+/// one RGBA8 pixel to its value `V`, `push` appends it to the output. Only misses call `compute`;
+/// a hit's key was stored from a successful miss with the same bytes, so an error always surfaces
+/// on a miss.
+fn drive<V, T, E>(
+    px: &[u8],
+    strategy: Strategy,
+    capacity: usize,
+    compute: impl Fn(&[u8]) -> Result<V, E>,
+    push: impl Fn(&mut Vec<T>, V),
+) -> Result<(Vec<T>, MemoStats), E>
+where
+    V: Copy + Default,
+{
+    let mut out = Vec::with_capacity(capacity);
     let mut stats = MemoStats::default();
+    let direct = |px: &[u8], out: &mut Vec<T>| -> Result<(), E> {
+        for p in px.chunks_exact(4) {
+            push(out, compute(p)?);
+        }
+        Ok(())
+    };
+    let memoized = |px: &[u8], cache: &mut memo::Memo<V>, out: &mut Vec<T>| -> Result<usize, E> {
+        let mut hits = 0;
+        for p in px.chunks_exact(4) {
+            let key = memo::key(p[0], p[1], p[2]);
+            let value = if let Some(v) = cache.get(key) {
+                hits += 1;
+                v
+            } else {
+                let v = compute(p)?;
+                cache.insert(key, v);
+                v
+            };
+            push(out, value);
+        }
+        Ok(hits)
+    };
     match strategy {
-        Strategy::Direct => shade_direct(px, lut, &kernel, &mut out)?,
+        Strategy::Direct => direct(px, &mut out)?,
         Strategy::Memo => {
             let total = px.len() / 4;
             let (probe, rest) = px.split_at(total.min(memo::PROBE_PIXELS) * 4);
-            let mut cache = memo::ByteMemo::new();
-            stats.probe_hits = shade_memo(probe, lut, &kernel, &mut cache, &mut out)?;
+            let mut cache = memo::Memo::<V>::new();
+            stats.probe_hits = memoized(probe, &mut cache, &mut out)?;
             stats.fell_back = memo::falls_back(total, stats.probe_hits);
             if stats.fell_back {
                 drop(cache);
-                shade_direct(rest, lut, &kernel, &mut out)?;
+                direct(rest, &mut out)?;
             } else {
-                shade_memo(rest, lut, &kernel, &mut cache, &mut out)?;
+                memoized(rest, &mut cache, &mut out)?;
             }
         }
     }
@@ -324,44 +459,6 @@ fn finish(px: [f32; 3]) -> Result<[u8; 3], RenderError> {
     } else {
         Err(RenderError::NonFinite)
     }
-}
-
-fn shade_direct<K: Fn([f32; 3]) -> [f32; 3]>(
-    px: &[u8],
-    lut: &[[f32; 256]; 3],
-    kernel: &K,
-    out: &mut Vec<u8>,
-) -> Result<(), RenderError> {
-    for p in px.chunks_exact(4) {
-        let [r, g, b] = finish(kernel(lut_pixel(p, lut)))?;
-        out.extend_from_slice(&[r, g, b, 255]);
-    }
-    Ok(())
-}
-
-/// Memoized loop; returns the hit count. Only misses run `kernel` and [`finish`]: a hit's key was
-/// stored from a finite miss with the same bytes, so a non-finite pixel always surfaces on a miss.
-fn shade_memo<K: Fn([f32; 3]) -> [f32; 3]>(
-    px: &[u8],
-    lut: &[[f32; 256]; 3],
-    kernel: &K,
-    cache: &mut memo::ByteMemo,
-    out: &mut Vec<u8>,
-) -> Result<usize, RenderError> {
-    let mut hits = 0;
-    for p in px.chunks_exact(4) {
-        let key = memo::key(p[0], p[1], p[2]);
-        let [r, g, b] = if let Some(rgb) = cache.get(key) {
-            hits += 1;
-            rgb
-        } else {
-            let rgb = finish(kernel(lut_pixel(p, lut)))?;
-            cache.insert(key, rgb);
-            rgb
-        };
-        out.extend_from_slice(&[r, g, b, 255]);
-    }
-    Ok(hits)
 }
 
 #[cfg(test)]
@@ -564,14 +661,64 @@ mod tests {
         assert!(chroma <= 1e-5, "{px:?}");
     }
 
+    /// P1: inactive spatial features leave `SpatialOps` empty, so the byte path runs.
     #[test]
-    fn rejects_each_plan_1b_feature_instead_of_ignoring_it() {
-        assert_eq!(rejected(|r| r.basic.clarity = 10.0), "basic.clarity");
-        assert_eq!(rejected(|r| r.detail.grain_amount = 30.0), "detail.grain");
-        assert_eq!(
-            rejected(|r| r.detail.vignette_amount = -30.0),
-            "detail.vignette"
-        );
+    fn spatial_ops_are_none_without_spatial_features() {
+        let r = norm(|r| {
+            r.detail.sharpen_radius = 2.0;
+            r.detail.grain_size = 80.0;
+            r.detail.vignette_midpoint = 10.0;
+            r.basic.dehaze = 30.0;
+        });
+        assert!(SpatialOps::new(r.recipe()).is_none());
+    }
+
+    #[test]
+    fn clarity_renders_identically_on_both_entry_points() {
+        let src = all_levels();
+        for (t, c) in [(40.0, 0.0), (0.0, -70.0), (100.0, 100.0)] {
+            let r = norm(|r| {
+                r.basic.texture = t;
+                r.basic.clarity = c;
+            });
+            assert_eq!(
+                render_rgba8(&src, &r, &CTX).unwrap(),
+                render(&ImageF32::from_rgba8(&src), &r, &CTX)
+                    .unwrap()
+                    .to_rgba8()
+            );
+            let sp = SpatialOps::new(r.recipe()).unwrap();
+            let (fast, _) = spatial_samples(&src, r.recipe(), &sp, 0, Strategy::Memo);
+            let reference = render(&ImageF32::from_rgba8(&src), &r, &CTX).unwrap();
+            assert_eq!(
+                fast.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                reference
+                    .samples()
+                    .iter()
+                    .map(|v| v.to_bits())
+                    .collect::<Vec<_>>()
+            );
+        }
+    }
+
+    #[test]
+    fn seed_changes_pixels_only_when_grain_is_active() {
+        let src = noise(40, 30, 4);
+        let render_with =
+            |r: &Normalized, seed| render_rgba8(&src, r, &RenderContext { seed }).unwrap();
+        let no_grain = norm(|r| {
+            r.detail.vignette_amount = -40.0;
+            r.detail.sharpen_amount = 50.0;
+            r.basic.clarity = 20.0;
+        });
+        assert_eq!(render_with(&no_grain, 1), render_with(&no_grain, 2));
+        let grain = norm(|r| r.detail.grain_amount = 40.0);
+        assert_ne!(render_with(&grain, 1), render_with(&grain, 2));
+        assert_eq!(render_with(&grain, 1), render_with(&grain, 1));
+    }
+
+    #[test]
+    fn rejects_masks_until_split_4() {
         assert_eq!(
             rejected(|r| r.masks.push(Mask::Range {
                 channel: RangeChannel::Luminance,
@@ -897,8 +1044,8 @@ mod tests {
 
     /// Memo path, direct path and the f32 reference all give the same bytes.
     fn assert_memo_matches(src: &Rgba8, r: &Normalized) -> MemoStats {
-        let (memo, stats) = render_rgba8_with(src, r, Strategy::Memo).unwrap();
-        let (direct, _) = render_rgba8_with(src, r, Strategy::Direct).unwrap();
+        let (memo, stats) = render_rgba8_with(src, r, CTX, Strategy::Memo).unwrap();
+        let (direct, _) = render_rgba8_with(src, r, CTX, Strategy::Direct).unwrap();
         let reference = render(&ImageF32::from_rgba8(src), r, &CTX)
             .unwrap()
             .to_rgba8();
@@ -951,10 +1098,8 @@ mod tests {
         assert!(stats.fell_back, "{stats:?}");
     }
 
-    /// M2 (other branch): a large image with few colors keeps the memo past the probe.
-    #[test]
-    fn memo_keeps_cache_on_few_colors_and_stays_bit_identical() {
-        let (w, h) = (512u32, 512u32);
+    /// RGBA8 image cycling through 64 fixed colors (alpha 0): large but nearly all cache hits.
+    fn few_colors(w: u32, h: u32) -> Rgba8 {
         let palette = lcg_bytes(64 * 3, 7);
         let mut d = Vec::with_capacity((w * h * 4) as usize);
         for i in 0..(w * h) as usize {
@@ -962,8 +1107,62 @@ mod tests {
             d.extend_from_slice(&palette[c * 3..c * 3 + 3]);
             d.push(0);
         }
-        let stats = assert_memo_matches(&Rgba8::new(w, h, d).unwrap(), &global_max());
+        Rgba8::new(w, h, d).unwrap()
+    }
+
+    /// M2 (other branch): a large image with few colors keeps the memo past the probe.
+    #[test]
+    fn memo_keeps_cache_on_few_colors_and_stays_bit_identical() {
+        let stats = assert_memo_matches(&few_colors(512, 512), &global_max());
         assert!(!stats.fell_back, "{stats:?}");
+    }
+
+    /// F1: the f32 memo returns exactly the kernel output, cached or not, with or without fallback.
+    #[test]
+    fn f32_memo_matches_direct_bits() {
+        let r = norm(|r| r.hsl.saturation = [30.0; 8]);
+        let ops = GlobalOps::new(r.recipe());
+        let lut = linear_stage_lut(&r.recipe().basic);
+        for (img, falls) in [(noise(512, 512, 9), true), (few_colors(512, 512), false)] {
+            let (memo, stats) = shade_f32(
+                img.data(),
+                &lut,
+                |e| global_encoded(e, &ops),
+                Strategy::Memo,
+            );
+            let (direct, _) = shade_f32(
+                img.data(),
+                &lut,
+                |e| global_encoded(e, &ops),
+                Strategy::Direct,
+            );
+            assert_eq!(stats.fell_back, falls);
+            assert_eq!(
+                memo.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                direct.iter().map(|v| v.to_bits()).collect::<Vec<_>>()
+            );
+        }
+    }
+
+    /// F2: a NaN-producing kernel gives the same NaN bits on both strategies.
+    #[test]
+    fn f32_memo_keeps_nan_bits() {
+        let lut = linear_stage_lut(&Recipe::default().basic);
+        let bad = lut[0][77];
+        let kernel = |px: [f32; 3]| {
+            if px[0].to_bits() == bad.to_bits() {
+                [f32::NAN, px[1], px[2]]
+            } else {
+                px
+            }
+        };
+        let mut px = [10u8, 20, 30, 255].repeat(50);
+        px.extend_from_slice(&[77, 0, 0, 255, 77, 0, 0, 255]);
+        let bits = |v: Vec<f32>| v.into_iter().map(f32::to_bits).collect::<Vec<_>>();
+        assert_eq!(
+            bits(shade_f32(&px, &lut, kernel, Strategy::Memo).0),
+            bits(shade_f32(&px, &lut, kernel, Strategy::Direct).0)
+        );
     }
 
     /// M3: distinct keys that share one slot, interleaved so every visit evicts the previous one.
@@ -1040,7 +1239,7 @@ mod tests {
         for r in &basic_grid() {
             let rec = r.recipe();
             let ops = GlobalOps::new(rec);
-            assert!(ops.stage5_inactive());
+            assert!(ops.only_basic());
             let lut = linear_stage_lut(&rec.basic);
             for p in src.data().chunks_exact(4) {
                 let enc = [
@@ -1062,8 +1261,276 @@ mod tests {
         let features = color_features();
         for f in &features[..5] {
             let r = norm(f);
-            assert!(!GlobalOps::new(r.recipe()).stage5_inactive());
+            assert!(!GlobalOps::new(r.recipe()).only_basic());
         }
-        assert!(GlobalOps::new(norm(|r| features[5](r)).recipe()).stage5_inactive());
+        assert!(GlobalOps::new(norm(|r| features[5](r)).recipe()).only_basic());
+        let r = norm(|r| r.basic.dehaze = 10.0);
+        assert!(!GlobalOps::new(r.recipe()).only_basic());
+    }
+
+    #[test]
+    fn dehaze_disables_the_basic_only_loop_and_renders() {
+        let r = norm(|r| r.basic.dehaze = 40.0);
+        assert!(!GlobalOps::new(r.recipe()).only_basic());
+        let src = ImageF32::new_filled(2, 2, [0.8; 3]).unwrap();
+        assert!(render(&src, &r, &CTX).unwrap().pixel(0, 0)[0] < 0.8);
+    }
+
+    #[test]
+    fn dehaze_lut_path_matches_reference_on_all_levels() {
+        let src = all_levels();
+        for d in [-100.0, -35.0, 20.0, 100.0] {
+            let r = norm(|r| r.basic.dehaze = d);
+            assert_eq!(
+                render_rgba8(&src, &r, &CTX).unwrap(),
+                render(&ImageF32::from_rgba8(&src), &r, &CTX)
+                    .unwrap()
+                    .to_rgba8()
+            );
+        }
+    }
+
+    fn detail_features() -> [fn(&mut Recipe); 6] {
+        [
+            |r| r.basic.texture = 45.0,
+            |r| r.basic.clarity = -55.0,
+            |r| r.basic.dehaze = 35.0,
+            |r| {
+                r.detail.sharpen_amount = 120.0;
+                r.detail.sharpen_radius = 2.2;
+                r.detail.sharpen_masking = 40.0;
+            },
+            |r| {
+                r.detail.vignette_amount = -60.0;
+                r.detail.vignette_feather = 20.0;
+            },
+            |r| {
+                r.detail.grain_amount = 70.0;
+                r.detail.grain_size = 60.0;
+                r.detail.grain_frequency = 80.0;
+            },
+        ]
+    }
+
+    fn bits(v: &[f32]) -> Vec<u32> {
+        v.iter().map(|x| x.to_bits()).collect()
+    }
+
+    /// Pre-quantization fast buffer and reference samples, compared bit for bit, plus final bytes.
+    fn assert_paths_match(src: &Rgba8, r: &Normalized, ctx: RenderContext) -> MemoStats {
+        let reference = render(&ImageF32::from_rgba8(src), r, &ctx).unwrap();
+        let sp = SpatialOps::new(r.recipe()).unwrap();
+        let (fast, stats) = spatial_samples(src, r.recipe(), &sp, ctx.seed, Strategy::Memo);
+        assert_eq!(bits(&fast), bits(reference.samples()));
+        assert_eq!(render_rgba8(src, r, &ctx).unwrap(), reference.to_rgba8());
+        stats
+    }
+
+    /// I1a: every subset of the 6 detail features that has a spatial stage, with and without
+    /// stage-5 color, on small images (R10: the full matrix stays cheap).
+    #[test]
+    fn detail_paths_are_bit_identical_for_every_feature_subset() {
+        let images = [all_levels(), noise(40, 30, 21)];
+        let feats = detail_features();
+        for mask in 1u32..64 {
+            for color in [false, true] {
+                let r = norm(|r| {
+                    for (i, f) in feats.iter().enumerate() {
+                        if (mask >> i) & 1 == 1 {
+                            f(r);
+                        }
+                    }
+                    if color {
+                        r.hsl.saturation = [25.0; 8];
+                    }
+                });
+                if mask == 1 << 2 {
+                    // dehaze alone: byte path, Task 2
+                    assert!(SpatialOps::new(r.recipe()).is_none());
+                    continue;
+                }
+                assert!(SpatialOps::new(r.recipe()).is_some(), "mask {mask:#08b}");
+                for src in &images {
+                    assert_paths_match(src, &r, RenderContext { seed: 9 });
+                }
+            }
+        }
+    }
+
+    /// I1b: all features on images past the memo probe, one that falls back and one that keeps
+    /// the cache.
+    #[test]
+    fn detail_paths_are_bit_identical_past_the_probe() {
+        let all = norm(|r| {
+            for f in detail_features() {
+                f(r);
+            }
+            r.hsl.saturation = [25.0; 8];
+        });
+        let ctx = RenderContext { seed: 9 };
+        assert!(assert_paths_match(&noise(300, 300, 21), &all, ctx).fell_back);
+        assert!(!assert_paths_match(&few_colors(300, 300), &all, ctx).fell_back);
+    }
+
+    /// I5 (R4): the spatial stages compose in the fixed order, checked against the components
+    /// applied by hand on the stage-5 output; the swapped order gives different bits, so the
+    /// fixture can tell.
+    #[test]
+    fn spatial_order_is_local_contrast_sharpen_vignette_grain() {
+        let src = noise(48, 40, 5);
+        let (w, h, seed) = (48usize, 40usize, 3u32);
+        let full = norm(|r| {
+            for f in detail_features() {
+                f(r);
+            }
+            r.hsl.saturation = [25.0; 8];
+        });
+        let rec = full.recipe();
+        // same non-spatial fields: dehaze + stage-5 HSL
+        let base = norm(|r| {
+            detail_features()[2](r);
+            r.hsl.saturation = [25.0; 8];
+        });
+        let stage5 = render(&ImageF32::from_rgba8(&src), &base, &CTX)
+            .unwrap()
+            .into_samples();
+        let lc = clarity::LocalContrast::new(&rec.basic).unwrap();
+        let sh = detail::Sharpen::new(&rec.detail).unwrap();
+        let vg = detail::Vignette::new(&rec.detail).unwrap();
+        let gr = detail::Grain::new(&rec.detail).unwrap();
+        let finish_px = |rgb: &mut Vec<f32>| {
+            for y in 0..h {
+                for x in 0..w {
+                    let i = (y * w + x) * 3;
+                    let px = vg.apply_px([rgb[i], rgb[i + 1], rgb[i + 2]], vg.weight(x, y, w, h));
+                    rgb[i..i + 3].copy_from_slice(&gr.apply_px(px, gr.noise(seed, x, y)));
+                }
+            }
+        };
+        let mut expected = stage5.clone();
+        lc.apply(&mut expected, w, h);
+        sh.apply(&mut expected, w, h);
+        finish_px(&mut expected);
+        let got = render(&ImageF32::from_rgba8(&src), &full, &RenderContext { seed }).unwrap();
+        assert_eq!(bits(got.samples()), bits(&expected));
+        let mut swapped = stage5;
+        sh.apply(&mut swapped, w, h);
+        lc.apply(&mut swapped, w, h);
+        finish_px(&mut swapped);
+        assert_ne!(bits(&swapped), bits(&expected));
+    }
+
+    /// I6 (R4): dehaze runs before basic tone (stage 4a), not after.
+    #[test]
+    fn dehaze_runs_before_basic_tone() {
+        let r = norm(|r| {
+            r.basic.dehaze = 60.0;
+            r.basic.contrast = 50.0;
+            r.basic.shadows = 40.0;
+        });
+        let ops = GlobalOps::new(r.recipe());
+        let b = &r.recipe().basic;
+        let tone = |p| {
+            basic::apply_color_encoded(basic::apply_tone_encoded(p, b), b.vibrance, b.saturation)
+        };
+        for px in [[0.7, 0.6, 0.5], [0.2, 0.25, 0.3], [1.3, 0.9, 0.8]] {
+            let expected = tone(basic::apply_dehaze_encoded(px, 0.6));
+            assert_eq!(
+                global_encoded(px, &ops).map(f32::to_bits),
+                expected.map(f32::to_bits)
+            );
+            assert_ne!(
+                basic::apply_dehaze_encoded(tone(px), 0.6).map(f32::to_bits),
+                expected.map(f32::to_bits)
+            );
+        }
+    }
+
+    /// I2: extremes stay finite (AC-E3c).
+    #[test]
+    fn extreme_detail_values_stay_finite() {
+        let src = all_levels();
+        for ev in [-5.0, 0.0, 5.0] {
+            for s in [-1.0f32, 1.0] {
+                let r = norm(|r| {
+                    r.basic.exposure = ev;
+                    r.basic.texture = 100.0 * s;
+                    r.basic.clarity = 100.0 * s;
+                    r.basic.dehaze = 100.0 * s;
+                    r.detail.sharpen_amount = 150.0;
+                    r.detail.sharpen_radius = 3.0;
+                    r.detail.sharpen_detail = 0.0;
+                    r.detail.sharpen_masking = 100.0;
+                    r.detail.grain_amount = 100.0;
+                    r.detail.grain_size = 0.0;
+                    r.detail.grain_frequency = 100.0;
+                    r.detail.vignette_amount = 100.0 * s;
+                    r.detail.vignette_midpoint = 0.0;
+                    r.detail.vignette_feather = 0.0;
+                });
+                assert!(render(&ImageF32::from_rgba8(&src), &r, &CTX)
+                    .unwrap()
+                    .samples()
+                    .iter()
+                    .all(|v| v.is_finite()));
+                assert!(render_rgba8(&src, &r, &CTX).is_ok());
+            }
+        }
+        // black, white, mid gray, with subnormal masking (R1), on both paths
+        for v in [0u8, 255, 128] {
+            let flat = Rgba8::new(32, 24, [v, v, v, 255].repeat(32 * 24)).unwrap();
+            let r = norm(|r| {
+                r.detail.sharpen_amount = 150.0;
+                r.detail.sharpen_masking = 1e-44;
+                r.basic.clarity = 100.0;
+                r.basic.dehaze = 100.0;
+                r.detail.grain_amount = 100.0;
+            });
+            assert!(render(&ImageF32::from_rgba8(&flat), &r, &CTX)
+                .unwrap()
+                .samples()
+                .iter()
+                .all(|x| x.is_finite()));
+            assert!(render_rgba8(&flat, &r, &CTX).is_ok());
+        }
+    }
+
+    /// I3: images smaller than every blur radius.
+    #[test]
+    fn tiny_images_render_on_both_paths() {
+        let all = norm(|r| {
+            for f in detail_features() {
+                f(r);
+            }
+        });
+        for (w, h) in [(1, 1), (3, 1), (1, 3), (5, 5)] {
+            let src = noise(w, h, 3);
+            assert_eq!(
+                render_rgba8(&src, &all, &CTX).unwrap(),
+                render(&ImageF32::from_rgba8(&src), &all, &CTX)
+                    .unwrap()
+                    .to_rgba8(),
+                "{w}x{h}"
+            );
+        }
+    }
+
+    /// I4: inactive detail fields alone never change pixels (seam), on the byte path.
+    #[test]
+    fn inactive_detail_fields_are_bitwise_noops() {
+        let src = all_levels();
+        let r = norm(|r| {
+            r.detail.sharpen_radius = 3.0;
+            r.detail.sharpen_detail = 0.0;
+            r.detail.sharpen_masking = 100.0;
+            r.detail.grain_size = 100.0;
+            r.detail.grain_frequency = 0.0;
+            r.detail.vignette_midpoint = 0.0;
+            r.detail.vignette_feather = 100.0;
+        });
+        assert_eq!(
+            render_rgba8(&src, &r, &RenderContext { seed: 77 }).unwrap(),
+            render_rgba8(&src, &norm(|_| {}), &CTX).unwrap()
+        );
     }
 }

@@ -141,6 +141,12 @@ impl ImageF32 {
         })
     }
 
+    /// Consumes the image and returns its interleaved RGB samples.
+    #[must_use]
+    pub fn into_samples(self) -> Vec<f32> {
+        self.data
+    }
+
     /// Wraps interleaved RGB samples after checking dimensions and length.
     pub fn from_samples(width: u32, height: u32, data: Vec<f32>) -> Result<Self, BufferError> {
         let expected = checked_len(width, height, 3)?;
